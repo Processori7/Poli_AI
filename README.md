@@ -250,7 +250,7 @@ Multifunctional AI agent for working with Pollinations.ai API. Supports image ge
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/Processori7/Poli_AI.git
    cd Poli_AI
    ```
 
