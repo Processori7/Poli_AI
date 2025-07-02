@@ -1,3 +1,17 @@
+
+# Функция для открытия файлов с использованием программ по умолчанию
+
+def open_file_with_default_program(file_path):
+    try:
+        if platform.system() == 'Windows':
+            os.startfile(file_path)
+        elif platform.system() == 'Darwin':  # macOS
+            subprocess.call(['open', file_path])
+        else:  # linux
+            subprocess.call(['xdg-open', file_path])
+    except Exception as e:
+        logger.error(f"Ошибка открытия файла {file_path}: {e}")
+
 import os
 import requests
 import base64
@@ -10,6 +24,9 @@ import urllib.parse
 import venv
 import webbrowser
 import platform
+import io
+import zipfile
+import mimetypes
 
 from tqdm import tqdm
 from loguru import logger
@@ -20,7 +37,40 @@ from tkinter import messagebox
 from packaging import version
 from lang import get_text, get_language_settings, save_language_settings, show_language_selection, translate_prompt_for_ai
 
-CURRENT_VERSION = "1.0"
+# Импорты для работы с различными форматами файлов
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    import pytesseract
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+
+try:
+    from docx import Document
+    from docx.shared import Inches
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+try:
+    import openpyxl
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+
+try:
+    from pptx import Presentation
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+CURRENT_VERSION = "1.1"
 # Логирование
 logger.add("pollinations_agent.log", rotation="50 MB")
 
@@ -283,6 +333,24 @@ class PollinationsAgent:
             
             # 💻 Разработка ПО
             "developSoftware": self.develop_software,
+            
+            # 📄 Чтение файлов различных форматов
+            "readAdvancedFile": self.read_advanced_file,
+            "readDocx": self.read_docx_file,
+            "readPdf": self.read_pdf_file,
+            "readExcel": self.read_excel_file,
+            "readPowerPoint": self.read_powerpoint_file,
+            
+            # 🖼️ Анализ изображений
+            "analyzeImage": self.analyze_image,
+            "recognizeText": self.recognize_text_from_image,
+            "getImageInfo": self.get_image_info,
+            "findAndAnalyzeFile": self.find_and_analyze_file,
+            
+            # 📂 Открытие и запуск файлов
+            "openFileWithDefaultProgram": self.open_file_with_default_program,
+            "runExecutable": self.run_executable,
+            "smartOpenFile": self.smart_open_file,
         }
 
         # Получаем доступные модели
@@ -1043,6 +1111,145 @@ class PollinationsAgent:
                         "required": []
                     }
                 }
+            },
+            # 🔍 Поиск и анализ файлов
+            {
+                "type": "function",
+                "function": {
+                    "name": "findAndAnalyzeFile",
+                    "description": "Находит и анализирует файл в текущей директории по запросу. Особенно полезно для поиска файлов по числам или ключевым словам.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Запрос для поиска файла (например, 'картинка 11', 'файл 21', 'изображение с текстом')"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            # 📄 Расширенное чтение файлов
+            {
+                "type": "function",
+                "function": {
+                    "name": "readAdvancedFile",
+                    "description": "Умное чтение файлов различных форматов (txt, docx, pdf, xlsx, pptx, изображения)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Путь к файлу для чтения"
+                            }
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            # 🖼️ Анализ изображений
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyzeImage",
+                    "description": "Анализирует изображение с помощью Vision API",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_path": {
+                                "type": "string",
+                                "description": "Путь к изображению для анализа"
+                            }
+                        },
+                        "required": ["image_path"]
+                    }
+                }
+            },
+            # 🔍 Распознавание текста
+            {
+                "type": "function",
+                "function": {
+                    "name": "recognizeText",
+                    "description": "Распознает текст на изображении (OCR)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_path": {
+                                "type": "string",
+                                "description": "Путь к изображению для распознавания текста"
+                            }
+                        },
+                        "required": ["image_path"]
+                    }
+                }
+            },
+            # 📂 Открытие и запуск файлов
+            {
+                "type": "function",
+                "function": {
+                    "name": "openFileWithDefaultProgram",
+                    "description": "Открывает файл с программой по умолчанию (например, .docx в Word, .pdf в PDF-ридере)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Путь к файлу для открытия"
+                            }
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "runExecutable",
+                    "description": "Запускает исполняемый файл (.exe, .bat, .cmd и др.) с возможностью запуска от имени администратора",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Путь к исполняемому файлу"
+                            },
+                            "run_as_admin": {
+                                "type": "boolean",
+                                "description": "Запустить от имени администратора (только Windows)",
+                                "default": False
+                            },
+                            "require_confirmation": {
+                                "type": "boolean",
+                                "description": "Требовать подтверждение пользователя перед запуском",
+                                "default": True
+                            }
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "smartOpenFile",
+                    "description": "Умное открытие файла: исполняемые файлы запускаются, остальные открываются с программой по умолчанию",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Путь к файлу для открытия"
+                            },
+                            "run_as_admin": {
+                                "type": "boolean",
+                                "description": "Запустить исполняемые файлы от имени администратора (только Windows)",
+                                "default": False
+                            }
+                        },
+                        "required": ["file_path"]
+                    }
+                }
             }
         ]
         return tools
@@ -1297,6 +1504,31 @@ class PollinationsAgent:
             # ⚙️ Системная информация
             elif function_name == "getSystemInfo":
                 return self.get_system_info()
+            
+            # 🔍 Поиск и анализ файлов
+            elif function_name == "findAndAnalyzeFile":
+                return self.find_and_analyze_file(function_args["query"])
+            elif function_name == "readAdvancedFile":
+                return self.read_advanced_file(function_args["file_path"])
+            elif function_name == "analyzeImage":
+                return self.analyze_image(function_args["image_path"])
+            elif function_name == "recognizeText":
+                return self.recognize_text_from_image(function_args["image_path"])
+            
+            # 📂 Открытие и запуск файлов
+            elif function_name == "openFileWithDefaultProgram":
+                return self.open_file_with_default_program(function_args["file_path"])
+            elif function_name == "runExecutable":
+                return self.run_executable(
+                    function_args["file_path"],
+                    function_args.get("run_as_admin", False),
+                    function_args.get("require_confirmation", True)
+                )
+            elif function_name == "smartOpenFile":
+                return self.smart_open_file(
+                    function_args["file_path"],
+                    function_args.get("run_as_admin", False)
+                )
             
             else:
                 return f"Неизвестный инструмент: {function_name}"
@@ -2005,6 +2237,558 @@ python main.py
         except Exception as e:
             return f"Критическая ошибка разработки ПО: {str(e)}"
     
+    # 📄 Чтение различных форматов файлов
+    def read_advanced_file(self, file_path):
+        """Умное чтение файлов различных форматов"""
+        try:
+            # Получаем расширение файла
+            _, ext = os.path.splitext(file_path.lower())
+            
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                return f"Файл не найден: {file_path}"
+            
+            # Выбираем подходящий метод чтения
+            if ext in ['.txt', '.log', '.json', '.xml', '.csv', '.md', '.py', '.js', '.html', '.css']:
+                return self.read_file(file_path)
+            elif ext in ['.docx', '.doc']:
+                return self.read_docx_file(file_path)
+            elif ext == '.pdf':
+                return self.read_pdf_file(file_path)
+            elif ext in ['.xlsx', '.xls']:
+                return self.read_excel_file(file_path)
+            elif ext in ['.pptx', '.ppt']:
+                return self.read_powerpoint_file(file_path)
+            elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']:
+                return self.analyze_image(file_path)
+            else:
+                # Пробуем прочитать как текстовый файл
+                return self.read_file(file_path)
+                
+        except Exception as e:
+            return f"Ошибка чтения файла: {str(e)}"
+    
+    def read_docx_file(self, file_path):
+        """Читает содержимое DOCX файла"""
+        try:
+            if not DOCX_AVAILABLE:
+                return "Ошибка: Модуль python-docx не установлен. Установите: pip install python-docx"
+            
+            doc = Document(file_path)
+            content = []
+            
+            # Читаем параграфы
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    content.append(paragraph.text.strip())
+            
+            # Читаем таблицы если есть
+            for table in doc.tables:
+                content.append("\n--- ТАБЛИЦА ---")
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        row_text.append(cell.text.strip())
+                    content.append(" | ".join(row_text))
+                content.append("--- КОНЕЦ ТАБЛИЦЫ ---\n")
+            
+            result = "\n".join(content)
+            logger.info(f"DOCX файл прочитан: {file_path}")
+            return result if result.strip() else "Документ пуст или не содержит текста"
+            
+        except Exception as e:
+            return f"Ошибка чтения DOCX файла: {str(e)}"
+    
+    def read_pdf_file(self, file_path):
+        """Читает содержимое PDF файла"""
+        try:
+            if not PDF_AVAILABLE:
+                return "Ошибка: Модуль PyPDF2 не установлен. Установите: pip install PyPDF2"
+            
+            content = []
+            
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                
+                # Читаем все страницы
+                for page_num, page in enumerate(pdf_reader.pages, 1):
+                    try:
+                        text = page.extract_text()
+                        if text.strip():
+                            content.append(f"--- СТРАНИЦА {page_num} ---")
+                            content.append(text.strip())
+                            content.append("")
+                    except Exception as e:
+                        content.append(f"--- СТРАНИЦА {page_num} (ОШИБКА ЧТЕНИЯ) ---")
+                        content.append(f"Ошибка: {str(e)}")
+                        content.append("")
+            
+            result = "\n".join(content)
+            logger.info(f"PDF файл прочитан: {file_path} ({len(pdf_reader.pages)} страниц)")
+            return result if result.strip() else "PDF документ пуст или не содержит извлекаемого текста"
+            
+        except Exception as e:
+            return f"Ошибка чтения PDF файла: {str(e)}"
+    
+    def read_excel_file(self, file_path):
+        """Читает содержимое Excel файла"""
+        try:
+            if not EXCEL_AVAILABLE:
+                return "Ошибка: Модуль openpyxl не установлен. Установите: pip install openpyxl"
+            
+            workbook = openpyxl.load_workbook(file_path, data_only=True)
+            content = []
+            
+            # Читаем все листы
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                content.append(f"--- ЛИСТ: {sheet_name} ---")
+                
+                # Определяем размеры данных
+                max_row = sheet.max_row
+                max_col = sheet.max_column
+                
+                if max_row > 0 and max_col > 0:
+                    # Читаем данные
+                    for row in sheet.iter_rows(min_row=1, max_row=min(max_row, 100), 
+                                               min_col=1, max_col=min(max_col, 20), 
+                                               values_only=True):
+                        row_text = []
+                        for cell in row:
+                            if cell is not None:
+                                row_text.append(str(cell))
+                            else:
+                                row_text.append("")
+                        if any(cell.strip() for cell in row_text if cell):
+                            content.append(" | ".join(row_text))
+                    
+                    if max_row > 100 or max_col > 20:
+                        content.append(f"... (показаны первые 100 строк и 20 столбцов из {max_row}x{max_col})")
+                else:
+                    content.append("Лист пуст")
+                
+                content.append("")
+            
+            result = "\n".join(content)
+            logger.info(f"Excel файл прочитан: {file_path}")
+            return result if result.strip() else "Excel файл пуст"
+            
+        except Exception as e:
+            return f"Ошибка чтения Excel файла: {str(e)}"
+    
+    def read_powerpoint_file(self, file_path):
+        """Читает содержимое PowerPoint файла"""
+        try:
+            if not PPTX_AVAILABLE:
+                return "Ошибка: Модуль python-pptx не установлен. Установите: pip install python-pptx"
+            
+            prs = Presentation(file_path)
+            content = []
+            
+            # Читаем все слайды
+            for slide_num, slide in enumerate(prs.slides, 1):
+                content.append(f"--- СЛАЙД {slide_num} ---")
+                
+                # Читаем все текстовые блоки на слайде
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        content.append(shape.text.strip())
+                
+                content.append("")
+            
+            result = "\n".join(content)
+            logger.info(f"PowerPoint файл прочитан: {file_path} ({len(prs.slides)} слайдов)")
+            return result if result.strip() else "PowerPoint презентация пуста или не содержит текста"
+            
+        except Exception as e:
+            return f"Ошибка чтения PowerPoint файла: {str(e)}"
+    
+    # 🖼️ Анализ изображений
+    def analyze_image(self, image_path):
+        """Анализирует изображение с помощью Pollinations Vision API"""
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(image_path):
+                return f"Изображение не найдено: {image_path}"
+            
+            # Кодируем изображение в base64
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Определяем MIME тип
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type or not mime_type.startswith('image/'):
+                mime_type = 'image/jpeg'  # Fallback
+            
+            # Отправляем запрос в Pollinations Vision API
+            payload = {
+                "model": "openai",  # Модель с поддержкой vision
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Проанализируй это изображение детально. Опиши что на нем изображено, цвета, объекты, текст (если есть), настроение, стиль и любые важные детали."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 500,
+                "private": True
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            if self.api_token:
+                headers["Authorization"] = f"Bearer {self.api_token}"
+            
+            response = requests.post(
+                f"{self.base_text_url}/openai",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                analysis = result["choices"][0]["message"].get("content", "")
+                logger.info(f"Изображение проанализировано: {image_path}")
+                return f"Анализ изображения {os.path.basename(image_path)}:\n\n{analysis}"
+            else:
+                return "Не удалось получить анализ изображения"
+                
+        except Exception as e:
+            return f"Ошибка анализа изображения: {str(e)}"
+    
+    def recognize_text_from_image(self, image_path):
+        """Распознает текст на изображении с помощью OCR"""
+        try:
+            if not PILLOW_AVAILABLE:
+                # Fallback к Pollinations Vision API для распознавания текста
+                return self._recognize_text_with_vision_api(image_path)
+            
+            # Используем pytesseract если доступен
+            try:
+                image = Image.open(image_path)
+                text = pytesseract.image_to_string(image, lang='rus+eng')
+                
+                if text.strip():
+                    logger.info(f"Текст распознан из изображения: {image_path}")
+                    return f"Распознанный текст из {os.path.basename(image_path)}:\n\n{text.strip()}"
+                else:
+                    return f"Текст не найден на изображении: {os.path.basename(image_path)}"
+                    
+            except Exception as tesseract_error:
+                # Если tesseract не работает, используем Vision API
+                logger.warning(f"Tesseract недоступен: {tesseract_error}")
+                return self._recognize_text_with_vision_api(image_path)
+                
+        except Exception as e:
+            return f"Ошибка распознавания текста: {str(e)}"
+    
+    def _recognize_text_with_vision_api(self, image_path):
+        """Распознает текст с помощью Pollinations Vision API"""
+        try:
+            # Кодируем изображение в base64
+            with open(image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Определяем MIME тип
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type or not mime_type.startswith('image/'):
+                mime_type = 'image/jpeg'
+            
+            # Отправляем запрос
+            payload = {
+                "model": "openai",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Извлеки и запиши весь текст, который ты видишь на этом изображении. Если текста нет, напиши 'Текст не найден'."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 300,
+                "private": True
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            if self.api_token:
+                headers["Authorization"] = f"Bearer {self.api_token}"
+            
+            response = requests.post(
+                f"{self.base_text_url}/openai",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                text = result["choices"][0]["message"].get("content", "")
+                logger.info(f"Текст распознан через Vision API: {image_path}")
+                return f"Распознанный текст из {os.path.basename(image_path)}:\n\n{text}"
+            else:
+                return "Не удалось распознать текст"
+                
+        except Exception as e:
+            return f"Ошибка распознавания текста через Vision API: {str(e)}"
+    
+    def get_image_info(self, image_path):
+        """Получает техническую информацию об изображении"""
+        try:
+            if not PILLOW_AVAILABLE:
+                return "Ошибка: Модуль Pillow не установлен. Установите: pip install Pillow"
+            
+            # Проверяем существование файла
+            if not os.path.exists(image_path):
+                return f"Изображение не найдено: {image_path}"
+            
+            # Открываем изображение
+            with Image.open(image_path) as img:
+                # Получаем базовую информацию
+                info = {
+                    "Имя файла": os.path.basename(image_path),
+                    "Размер файла": f"{os.path.getsize(image_path) / 1024:.1f} КБ",
+                    "Формат": img.format,
+                    "Режим": img.mode,
+                    "Размер (пиксели)": f"{img.width} x {img.height}",
+                    "Соотношение сторон": f"{img.width/img.height:.2f}:1"
+                }
+                
+                # Дополнительная информация если доступна
+                if hasattr(img, 'info') and img.info:
+                    for key, value in img.info.items():
+                        if isinstance(value, (str, int, float)):
+                            info[f"EXIF {key}"] = value
+                
+                result = "Информация об изображении:\n\n"
+                for key, value in info.items():
+                    result += f"{key}: {value}\n"
+                
+                logger.info(f"Получена информация об изображении: {image_path}")
+                return result
+                
+        except Exception as e:
+            return f"Ошибка получения информации об изображении: {str(e)}"
+    
+    def find_and_analyze_file(self, query):
+        """Находит и анализирует файл в текущей директории по запросу"""
+        try:
+            # Получаем список файлов в текущей директории
+            current_files = os.listdir(".")
+            
+            # Извлекаем числа из запроса
+            import re
+            numbers_in_query = re.findall(r'\b\d+\b', query)
+            
+            # Определяем тип файла для поиска
+            query_lower = query.lower()
+            
+            target_file = None
+            
+            # Если есть числа в запросе, ищем файл с этим числом
+            if numbers_in_query:
+                for number in numbers_in_query:
+                    for filename in current_files:
+                        if number in filename:
+                            target_file = filename
+                            break
+                    if target_file:
+                        break
+            
+            # Если не нашли по числу, ищем по типу файла
+            if not target_file:
+                image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+                document_extensions = ['.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt']
+                text_extensions = ['.txt', '.log', '.json', '.xml', '.csv', '.md']
+                
+                if any(word in query_lower for word in ['картинк', 'изображен', 'фото', 'рисунок']):
+                    # Ищем изображения
+                    for filename in current_files:
+                        if any(filename.lower().endswith(ext) for ext in image_extensions):
+                            target_file = filename
+                            break
+                elif any(word in query_lower for word in ['документ', 'файл', 'текст']):
+                    # Ищем документы
+                    for filename in current_files:
+                        if any(filename.lower().endswith(ext) for ext in document_extensions + text_extensions):
+                            target_file = filename
+                            break
+            
+            # Если все еще не нашли, берем первый подходящий файл
+            if not target_file:
+                # Приоритет изображениям, затем документам
+                all_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp',
+                                '.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt',
+                                '.txt', '.log', '.json', '.xml', '.csv', '.md']
+                
+                for filename in current_files:
+                    if any(filename.lower().endswith(ext) for ext in all_extensions):
+                        target_file = filename
+                        break
+            
+            if not target_file:
+                return f"Не найден подходящий файл для анализа в текущей директории.\n\nДоступные файлы: {', '.join(current_files)}"
+            
+            print(f"🔍 Найден файл для анализа: {target_file}")
+            
+            # Определяем тип анализа
+            if any(word in query_lower for word in ['написан', 'текст', 'надпись', 'распознай']):
+                # Распознавание текста
+                return self.recognize_text_from_image(target_file)
+            else:
+                # Обычный анализ файла
+                return self.read_advanced_file(target_file)
+                
+        except Exception as e:
+            return f"Ошибка поиска и анализа файла: {str(e)}"
+    
+    def open_file_with_default_program(self, file_path):
+        """Открывает файл с программой по умолчанию"""
+        try:
+            # Проверяем существование файла
+            if os.path.exists(file_path):
+                actual_file = file_path
+            else:
+                # Ищем похожий файл
+                actual_file = self._find_similar_file(file_path)
+                if not actual_file:
+                    return f"Файл не найден: {file_path}. Проверьте имя файла и попробуйте снова."
+                print(f"🔍 Найден похожий файл: {actual_file}")
+            
+            logger.info(f"Открытие файла с программой по умолчанию: {actual_file}")
+            
+            if platform.system() == 'Windows':
+                os.startfile(actual_file)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.call(['open', actual_file])
+            else:  # Linux
+                subprocess.call(['xdg-open', actual_file])
+            
+            return f"Файл открыт: {actual_file}"
+        except Exception as e:
+            return f"Ошибка открытия файла: {str(e)}"
+    
+    def run_executable(self, file_path, run_as_admin=False, require_confirmation=True):
+        """Запускает исполняемый файл"""
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                return f"Файл не найден: {file_path}"
+            
+            # Проверяем, что это исполняемый файл
+            _, ext = os.path.splitext(file_path.lower())
+            executable_extensions = ['.exe', '.bat', '.cmd', '.com', '.scr', '.msi']
+            
+            if ext not in executable_extensions:
+                return f"Файл не является исполняемым: {file_path} (расширение: {ext})"
+            
+            if require_confirmation:
+                print(f"⚠️ Запрос на запуск исполняемого файла: {file_path}")
+                if run_as_admin:
+                    print(f"🔐 Файл будет запущен от имени администратора")
+                confirm = input("Разрешить запуск? (y/n): ").lower()
+                if confirm != 'y':
+                    return "Запуск файла отменен пользователем"
+            
+            logger.info(f"Запуск исполняемого файла: {file_path} (admin: {run_as_admin})")
+            
+            if platform.system() == 'Windows':
+                if run_as_admin:
+                    # Запуск от имени администратора через PowerShell
+                    command = ['powershell', '-Command', f'Start-Process "{file_path}" -Verb RunAs']
+                    subprocess.run(command, shell=True)
+                else:
+                    # Обычный запуск
+                    subprocess.Popen([file_path], shell=True)
+            else:
+                # Для Linux/macOS
+                if run_as_admin:
+                    return "Запуск от имени администратора поддерживается только в Windows"
+                subprocess.Popen([file_path])
+            
+            return f"Исполняемый файл запущен: {file_path}"
+        except Exception as e:
+            return f"Ошибка запуска исполняемого файла: {str(e)}"
+    
+    def _find_similar_file(self, file_path):
+        """Ищет похожий файл в текущей директории"""
+        try:
+            import os
+            import re
+            
+            # Получаем имя файла без пути
+            filename = os.path.basename(file_path)
+            name, ext = os.path.splitext(filename)
+            
+            # Получаем список всех файлов в текущей директории
+            current_dir = os.path.dirname(file_path) if os.path.dirname(file_path) else "."
+            all_files = os.listdir(current_dir)
+            
+            # Сначала ищем точное совпадение по имени с разными расширениями
+            for file in all_files:
+                file_name, file_ext = os.path.splitext(file)
+                if file_name.lower() == name.lower():
+                    return os.path.join(current_dir, file)
+            
+            # Затем ищем файлы, содержащие искомое имя
+            for file in all_files:
+                if name.lower() in file.lower():
+                    return os.path.join(current_dir, file)
+            
+            # Ищем по числам в имени файла
+            numbers_in_name = re.findall(r'\d+', name)
+            if numbers_in_name:
+                for number in numbers_in_name:
+                    for file in all_files:
+                        if number in file:
+                            return os.path.join(current_dir, file)
+            
+            return None
+            
+        except Exception as e:
+            print(f"Ошибка поиска похожего файла: {e}")
+            return None
+
+    def smart_open_file(self, file_path, run_as_admin=False):
+        """Умное открытие файла: исполняемые запускаются, остальные открываются с программой по умолчанию"""
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                return f"Файл не найден: {file_path}"
+            
+            # Получаем расширение файла
+            _, ext = os.path.splitext(file_path.lower())
+            
+            # Определяем исполняемые файлы
+            executable_extensions = ['.exe', '.bat', '.cmd', '.com', '.scr', '.msi']
+            
+            if ext in executable_extensions:
+                # Запускаем как исполняемый файл
+                return self.run_executable(file_path, run_as_admin)
+            else:
+                # Открываем с программой по умолчанию
+                return self.open_file_with_default_program(file_path)
+        except Exception as e:
+            return f"Ошибка открытия файла: {str(e)}"
+    
     def _analyze_task_and_select_language(self, task_description):
         """Анализирует задачу и выбирает подходящий язык программирования"""
         try:
@@ -2374,7 +3158,11 @@ python main.py
             "сохрани", "измени", "переведи", "поиск в интернете", "найди в интернете",
             "создать", "сгенерировать", "скачать", "загрузить", "удалить", "переместить",
             "аудио", "удио", "озвучь", "озвучить", "произнеси", "говори", "скажи", "voice", "audio", "sound",
-            "изображение", "картинка", "рисунок", "фото", "image", "picture", "photo", "найди", "search"
+            "изображение", "картинка", "рисунок", "фото", "image", "picture", "photo", "найди", "search",
+            # Добавляем ключевые слова для чтения файлов
+            "прочитай", "прочти", "читай", "что написано", "содержимое", "содержание", "текст из",
+            "что в файле", "что в документе", "посмотри файл", "покажи файл", "файл содержит",
+            "read file", "show file", "file content", "file contains"
         ]
         
         # Специальная проверка для аудио запросов
@@ -2542,5 +3330,6 @@ python main.py
                 print(f"💡 Попробуйте переформулировать задачу более конкретно.")
 
 if __name__ == "__main__":
+    check_for_updates()
     agent = PollinationsAgent()
     agent.run()

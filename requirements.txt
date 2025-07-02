@@ -6,3 +6,13 @@ python-dotenv
 psutil
 pydub
 packaging
+# Для работы с изображениями и OCR
+Pillow
+pytesseract
+# Для работы с документами Office
+python-docx
+openpyxl
+python-pptx
+# Для работы с PDF
+PyPDF2
+python-docx
