@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+tqdm
+loguru
+python-dotenv
+psutil
+pydub
+packaging
