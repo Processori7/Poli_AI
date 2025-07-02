@@ -271,7 +271,7 @@ class PollinationsAgent:
             
         # Загружаем настройки из .env файла
         self.api_token = os.getenv('POLLINATIONS_TOKEN')
-        # Загружаем языковые настройки через функции i18n
+
         lang_settings = get_language_settings()
         self.interface_language = lang_settings['interface']
         self.output_language = lang_settings['output']
