@@ -1,17 +1,3 @@
-
-# Функция для открытия файлов с использованием программ по умолчанию
-
-def open_file_with_default_program(file_path):
-    try:
-        if platform.system() == 'Windows':
-            os.startfile(file_path)
-        elif platform.system() == 'Darwin':  # macOS
-            subprocess.call(['open', file_path])
-        else:  # linux
-            subprocess.call(['xdg-open', file_path])
-    except Exception as e:
-        logger.error(f"Ошибка открытия файла {file_path}: {e}")
-
 import os
 import requests
 import base64
@@ -24,9 +10,8 @@ import urllib.parse
 import venv
 import webbrowser
 import platform
-import io
-import zipfile
 import mimetypes
+import psutil
 
 from tqdm import tqdm
 from loguru import logger
@@ -35,6 +20,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from tkinter import messagebox
 from packaging import version
+from dotenv import set_key
 from lang import get_text, get_language_settings, save_language_settings, show_language_selection, translate_prompt_for_ai
 
 # Импорты для работы с различными форматами файлов
@@ -70,9 +56,39 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-CURRENT_VERSION = "1.1"
-# Логирование
-logger.add("pollinations_agent.log", rotation="50 MB")
+CURRENT_VERSION = "1.2"
+
+def open_file_with_default_program(file_path):
+    try:
+        if platform.system() == 'Windows':
+            os.startfile(file_path)
+        elif platform.system() == 'Darwin':  # macOS
+            subprocess.call(['open', file_path])
+        else:  # linux
+            subprocess.call(['xdg-open', file_path])
+    except Exception as e:
+        logger.error(f"Ошибка открытия файла {file_path}: {e}")
+
+
+# Настройка логирования
+def setup_logging():
+    """Настраивает логирование в зависимости от настроек"""
+    # Загружаем переменные окружения для проверки настроек
+    load_dotenv()
+    
+    file_logging = os.getenv('FILE_LOGGING', 'true').lower() == 'true'
+    debug_mode = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
+    
+    if file_logging:
+        # Создаем файл логов только если логирование включено
+        log_file = "pollinations_agent.log"
+        logger.add(log_file, rotation="50 MB", level="DEBUG" if debug_mode else "INFO")
+        print(f"📝 Логирование в файл включено: {log_file}")
+    else:
+        print("📝 Логирование в файл отключено")
+
+# Вызываем настройку логирования
+setup_logging()
 
 # Имитация флага перевода
 class MainApp:
@@ -258,23 +274,53 @@ def get_Polinations_chat_models():
         return [{"name": "o3-mini", "description": "Быстрая и эффективная модель"}]
 
 # Класс агента
+def create_env_file(env_file_path):
+    """Creates .env file if it does not exist and initializes it with default settings"""
+
+    if not os.path.exists(env_file_path):
+        # Создаем файл только с обязательными настройками, оставляя выбор языка для первого запуска
+        set_key(env_file_path, 'POLLINATIONS_TOKEN', '')
+        set_key(env_file_path, 'FIRST_STARTUP_LANGUAGE_SELECTION', 'true')
+        set_key(env_file_path, 'DEFAULT_MODEL', 'openai')
+        set_key(env_file_path, 'MAX_ATTEMPTS', '5')
+        set_key(env_file_path, 'AUTO_MODEL_SELECTION', 'false')
+        set_key(env_file_path, 'DEFAULT_VOICE', 'alloy')
+        set_key(env_file_path, 'REQUIRE_CONFIRMATION', 'true')
+        set_key(env_file_path, 'DEBUG_MODE', 'false')
+        set_key(env_file_path, 'FILE_LOGGING', 'true')
+        print(f"🔧 .env файл создан: {env_file_path}")
+        return True  # Возвращаем True если файл был создан
+    else:
+        print(f"🔧 .env файл уже существует: {env_file_path}")
+        return False  # Возвращаем False если файл уже существовал
+
+
 class PollinationsAgent:
     def __init__(self):
+        # Создаем .env файл если его нет (с настройками по умолчанию)
+        file_was_created = create_env_file('.env')
+        
         # Загружаем переменные окружения из .env файла
         load_dotenv()
         
         self.base_text_url = "https://text.pollinations.ai"
         self.base_image_url = "https://image.pollinations.ai"
         self.output_dir = "output"
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
             
         # Загружаем настройки из .env файла
         self.api_token = os.getenv('POLLINATIONS_TOKEN')
 
-        lang_settings = get_language_settings()
-        self.interface_language = lang_settings['interface']
-        self.output_language = lang_settings['output']
+        # Если файл был только что создан, принудительно устанавливаем первый запуск
+        if file_was_created:
+            self.first_startup_language_selection = True
+            self.interface_language = 'ru'  # Временно по умолчанию
+            self.output_language = 'ru'     # Временно по умолчанию
+        else:
+            lang_settings = get_language_settings()
+            self.interface_language = lang_settings['interface']
+            self.output_language = lang_settings['output']
+            self.first_startup_language_selection = lang_settings['first_startup']
+            
         self.default_model = os.getenv('DEFAULT_MODEL', 'openai')
         self.max_attempts = int(os.getenv('MAX_ATTEMPTS', '3'))
         self.default_voice = os.getenv('DEFAULT_VOICE', 'alloy')
@@ -506,44 +552,7 @@ class PollinationsAgent:
             # Возвращаем стандартные голоса OpenAI
             return ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 
-    # def translate_to_english(self, text):
-    #     """Переводит текст на английский язык"""
-    #     try:
-    #         # Проверяем, нужен ли перевод (если текст уже на английском)
-    #         if self._is_english(text):
-    #             return text
-    #
-    #         prompt = f"Переведи следующий текст на английский язык. Отвечай только переводом без дополнительных комментариев:\n\n{text}"
-    #
-    #         messages = [{"role": "user", "content": prompt}]
-    #         response = communicate_with_Pollinations_chat(self.current_model, messages)
-    #
-    #         if "choices" in response and len(response["choices"]) > 0:
-    #             translated = response["choices"][0]["message"].get("content", "").strip()
-    #             logger.info(f"Текст переведен: '{text}' -> '{translated}'")
-    #             return translated
-    #         else:
-    #             logger.warning(f"Не удалось перевести текст: {text}")
-    #             return text
-    #     except Exception as e:
-    #         logger.warning(f"Ошибка перевода: {str(e)}")
-    #         return text
-    #
-    # def _is_english(self, text):
-    #     """Проверяет, написан ли текст на английском языке"""
-    #     try:
-    #         # Простая эвристика: если больше 70% символов - латинские, считаем английским
-    #         latin_chars = sum(1 for c in text if c.isalpha() and ord(c) < 128)
-    #         total_chars = sum(1 for c in text if c.isalpha())
-    #
-    #         if total_chars == 0:
-    #             return True  # Если нет букв, считаем английским
-    #
-    #         return (latin_chars / total_chars) > 0.7
-    #     except:
-    #         return False
-
-    def check_answear(self) -> bool:
+    def check_answear(self):
         if not self.api_token:
             print(f"\n⚠️ Pollinations API токен не найден")
             print(f"🔗 Получите токен на: https://auth.pollinations.ai/")
@@ -678,7 +687,10 @@ class PollinationsAgent:
             clean_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_')).rstrip()
             if not clean_filename:
                 clean_filename = "audio_output"
-            
+
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
             filepath = os.path.join(self.output_dir, f"{clean_filename}.{extension}")
             print(f"💾 Сохранение в: {filepath}")
             
@@ -727,9 +739,6 @@ class PollinationsAgent:
     def change_model(self):
         """Смена текущей модели"""
         self.select_model()
-
-    def get_available_tools(self):
-        return self.mcp_tools
     
     def get_openai_format_tools(self):
         """Преобразует инструменты в формат OpenAI"""
@@ -1599,6 +1608,9 @@ class PollinationsAgent:
             response.raise_for_status()
             
             # Определяем путь сохранения
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
             if not save_path:
                 save_path = self.output_dir
             
@@ -1643,6 +1655,9 @@ class PollinationsAgent:
                 filename = os.path.basename(parsed_url.path) or "downloaded_file"
             
             # Определяем путь сохранения
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
             if not save_path:
                 save_path = self.output_dir
             
@@ -1682,7 +1697,10 @@ class PollinationsAgent:
                         filename += '.gif'
                     else:
                         filename += '.jpg'
-            
+
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
             # Определяем путь сохранения
             if not save_path:
                 save_path = self.output_dir
@@ -1767,6 +1785,9 @@ class PollinationsAgent:
             print(f"🐍 Выполняется Python код...")
             
             # Создаем временный файл
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
             temp_file = os.path.join(self.output_dir, "temp_script.py")
             with open(temp_file, 'w', encoding='utf-8') as f:
                 f.write(code)
@@ -1827,8 +1848,6 @@ class PollinationsAgent:
     def get_system_info(self):
         """Получает информацию о системе"""
         try:
-            import platform
-            import psutil
             
             info = {
                 "Операционная система": platform.system(),
@@ -2594,14 +2613,54 @@ python main.py
             # Получаем список файлов в текущей директории
             current_files = os.listdir(".")
             
+            # Создаем словари для поиска по именам файлов (с расширением и без)
+            base_names = {os.path.splitext(f)[0].lower(): f for f in current_files}
+            full_names = {f.lower(): f for f in current_files}
+            
             # Извлекаем числа из запроса
-            import re
             numbers_in_query = re.findall(r'\b\d+\b', query)
             
             # Определяем тип файла для поиска
             query_lower = query.lower()
             
+            # ПРИОРИТЕТ 1: Точное совпадение полного имени файла (с расширением)
             target_file = None
+            words_in_query = [word.strip() for word in query_lower.split() if len(word.strip()) > 1]
+            
+            for word in words_in_query:
+                # Проверяем точное совпадение с полным именем файла
+                if word in full_names:
+                    target_file = full_names[word]
+                    print(f"🎯 Найден файл по полному имени: {target_file}")
+                    break
+                
+                # Проверяем точное совпадение с именем файла без расширения
+                if word in base_names:
+                    target_file = base_names[word]
+                    print(f"🎯 Найден файл по базовому имени: {target_file}")
+                    break
+            
+            # ПРИОРИТЕТ 2: Частичное совпадение с полным именем файла
+            if not target_file:
+                for word in words_in_query:
+                    for full_name, actual_file in full_names.items():
+                        if word in full_name:
+                            target_file = actual_file
+                            print(f"🔍 Найден файл по частичному совпадению (полное имя): {target_file}")
+                            break
+                    if target_file:
+                        break
+            
+            # ПРИОРИТЕТ 3: Частичное совпадение с базовым именем файла (без расширения)
+            if not target_file:
+                for word in words_in_query:
+                    for base_name, actual_file in base_names.items():
+                        if word in base_name:
+                            target_file = actual_file
+                            print(f"🔍 Найден файл по частичному совпадению (базовое имя): {target_file}")
+                            break
+                    if target_file:
+                        break
             
             # Если есть числа в запросе, ищем файл с этим числом
             if numbers_in_query:
@@ -2731,8 +2790,6 @@ python main.py
     def _find_similar_file(self, file_path):
         """Ищет похожий файл в текущей директории"""
         try:
-            import os
-            import re
             
             # Получаем имя файла без пути
             filename = os.path.basename(file_path)
@@ -3035,7 +3092,6 @@ python main.py
             print(f"⚙️ Выполненные действия: {executed_actions}")
             
             # Разбиваем задачу на составные шаги
-            import re
             task_steps = re.split(r'\b(?:затем|потом|после этого|а затем)\b', task_lower)
 
             task_steps = [step.strip() for step in task_steps if step.strip()]
@@ -3049,7 +3105,6 @@ python main.py
                 # Проверяем создание папок - улучшенная логика
                 if "создай" in step and "папк" in step:
                     # Считаем сколько папок нужно создать
-                    import re
                     folder_numbers = re.findall(r'\b\d+\b', step)
                     expected_dirs = len(folder_numbers) if folder_numbers else 1
                     actual_dirs = executed_str.count("createdirectory")
@@ -3061,7 +3116,6 @@ python main.py
                 # Проверяем создание файлов - улучшенная логика
                 if "создай" in step and "файл" in step:
                     # Считаем сколько файлов нужно создать
-                    import re
                     # Ищем паттерны типа "файл 11.txt", "файл 21.txt" или "в папке 11 создай файл"
                     file_mentions = re.findall(r'файл\s+[\w\.]+|в\s+папке\s+\d+\s+создай\s+файл', step)
                     
@@ -3088,7 +3142,6 @@ python main.py
                     # Если упоминаются конкретные папки или файлы
                     if "файлы из папок" in step or "из папок" in step:
                         # Ищем упоминания чисел или имен папок
-                        import re
                         folder_numbers = re.findall(r'\b\d+\b', step)
                         if folder_numbers:
                             expected_moves = len(folder_numbers)  # По одному файлу из каждой папки
@@ -3280,8 +3333,8 @@ python main.py
 
     def run(self):
         # Проверяем, нужно ли показать выбор языка при первом запуске
-        lang_settings = get_language_settings()
-        if lang_settings['first_startup']:
+        # Используем переменную экземпляра, которая корректно установлена в __init__
+        if self.first_startup_language_selection:
             interface_lang, output_lang = show_language_selection()
             save_language_settings(interface_lang, output_lang)
             # Обновляем настройки в текущем экземпляре

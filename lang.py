@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import os
+
 """
 Модуль интернационализации для Pollinations AI Agent
 Поддержка русского и английского языков
@@ -26,10 +28,10 @@ TRANSLATIONS = {
         'change_model': 'Смена модели',
         
         # Интерфейс
-        'enter_task': 'Введите вашу задачу (или \'exit\' для выхода, \'change\' для смены модели):',
+        'enter_task': 'Введите вашу задачу (или \'exit\' или \'выход\' для выхода, \'change\' или \'изменить\' для смены модели):',
         'enter_task_short': 'Введите вашу задачу:',
-        'exit_command': 'exit',
-        'change_command': 'change',
+        'exit_command': 'выход',
+        'change_command': 'изменить',
         'result': 'Результат:',
         'yes': 'да',
         'no': 'нет',
@@ -300,7 +302,6 @@ def get_language_settings():
     Returns:
         dict: Словарь с настройками языка
     """
-    import os
     return {
         'interface': os.getenv('INTERFACE_LANGUAGE', 'ru'),
         'output': os.getenv('OUTPUT_LANGUAGE', 'ru'),
