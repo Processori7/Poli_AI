@@ -12,6 +12,7 @@ import webbrowser
 import platform
 import mimetypes
 import psutil
+import io
 
 from tqdm import tqdm
 from loguru import logger
@@ -26,10 +27,15 @@ from lang import get_text, get_language_settings, save_language_settings, show_l
 # Импорты для работы с различными форматами файлов
 try:
     from PIL import Image, ImageDraw, ImageFont
-    import pytesseract
     PILLOW_AVAILABLE = True
 except ImportError:
     PILLOW_AVAILABLE = False
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
 
 try:
     from docx import Document
@@ -56,7 +62,7 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-CURRENT_VERSION = "1.2"
+CURRENT_VERSION = "1.3"
 
 def open_file_with_default_program(file_path):
     try:
@@ -261,17 +267,34 @@ def get_Polinations_chat_models():
                 if isinstance(model, dict) and "name" in model:
                     model_name = model["name"]
                     model_description = model.get("description", "Без описания")
+                    
+                    # Получаем модальности из API или определяем вручную
+                    input_modalities = model.get("input_modalities", [])
+                    
+                    # Если API не возвращает модальности, задаем их вручную для известных моделей
+                    if not input_modalities:
+                        # Модели OpenAI поддерживают текст и изображения
+                        if "openai" in model_name.lower():
+                            input_modalities = ["text", "image"]
+                        # Модели с audio в названии поддерживают аудио
+                        elif "audio" in model_name.lower():
+                            input_modalities = ["text", "audio"]
+                        # Остальные модели поддерживают только текст
+                        else:
+                            input_modalities = ["text"]
+                    
                     models_list.append({
                         "name": model_name,
-                        "description": model_description
+                        "description": model_description,
+                        "input_modalities": input_modalities
                     })
             return models_list
         else:
             print(f"Ошибка получения списка моделей: {resp.status_code}")
-            return [{"name": "o3-mini", "description": "Быстрая и эффективная модель"}]
+            return [{"name": "o3-mini", "description": "Быстрая и эффективная модель", "input_modalities": ["text"]}]
     except Exception as e:
         print(f"Ошибка при получении списка моделей: {e}")
-        return [{"name": "o3-mini", "description": "Быстрая и эффективная модель"}]
+        return [{"name": "o3-mini", "description": "Быстрая и эффективная модель", "input_modalities": ["text"]}]
 
 # Класс агента
 def create_env_file(env_file_path):
@@ -322,7 +345,7 @@ class PollinationsAgent:
             self.first_startup_language_selection = lang_settings['first_startup']
             
         self.default_model = os.getenv('DEFAULT_MODEL', 'openai')
-        self.max_attempts = int(os.getenv('MAX_ATTEMPTS', '3'))
+        self.max_attempts = int(os.getenv('MAX_ATTEMPTS', '5'))
         self.default_voice = os.getenv('DEFAULT_VOICE', 'alloy')
         self.require_confirmation = os.getenv('REQUIRE_CONFIRMATION', 'true').lower() == 'true'
         self.debug_mode = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
@@ -406,6 +429,88 @@ class PollinationsAgent:
 
         # Сохраняем только имена моделей
         self.model_list = [model['name'] for model in self.chat_models]
+        
+        # Создаем словарь для быстрого поиска модели по имени
+        self.models_by_name = {model['name']: model for model in self.chat_models}
+    
+    def get_models_with_modality(self, required_modality):
+        """Получает список моделей, поддерживающих определенную модальность"""
+        compatible_models = []
+        
+        for model in self.chat_models:
+            input_modalities = model.get('input_modalities', [])
+            if required_modality in input_modalities:
+                compatible_models.append(model['name'])
+        
+        return compatible_models
+    
+    def get_vision_models(self):
+        """Получает список моделей, поддерживающих анализ изображений"""
+        if self.debug_mode:
+            print(f"🔍 DEBUG: Запрос моделей с модальностью 'image'")
+            
+            # Отладка: покажем информацию о всех моделях
+            print(f"🔍 DEBUG: Всего моделей: {len(self.chat_models)}")
+            for i, model in enumerate(self.chat_models[:5]):  # Показываем первые 5 для примера
+                modalities = model.get('input_modalities', [])
+                vision_flag = model.get('vision', False)
+                print(f"🔍 DEBUG: Модель {i+1}: {model['name']}, modalities: {modalities}, vision: {vision_flag}")
+        
+        result = self.get_models_with_modality('image')
+        if self.debug_mode:
+            print(f"🔍 DEBUG: Результат get_models_with_modality('image'): {result}")
+        return result
+    
+    def get_audio_models(self):
+        """Получает список моделей, поддерживающих анализ аудио"""
+        return self.get_models_with_modality('audio')
+    
+    def get_text_only_models(self):
+        """Получает список моделей, поддерживающих только текст"""
+        text_only_models = []
+        
+        for model in self.chat_models:
+            input_modalities = model.get('input_modalities', [])
+            # Модель поддерживает только текст, если в input_modalities только "text"
+            if input_modalities == ['text']:
+                text_only_models.append(model['name'])
+        
+        return text_only_models
+    
+    def show_incompatible_models_warning(self, required_modality, action_name):
+        """Показывает предупреждение о несовместимых моделях и список поддерживаемых"""
+        current_model_info = self.models_by_name.get(self.current_model, {})
+        current_modalities = current_model_info.get('input_modalities', [])
+        
+        if required_modality not in current_modalities:
+            compatible_models = self.get_models_with_modality(required_modality)
+            
+            if compatible_models:
+                print(f"\n⚠️ Модель '{self.current_model}' не поддерживает {action_name}!")
+                print(f"🎯 Поддерживаемые модальности: {', '.join(current_modalities)}")
+                print(f"\n✅ Модели, поддерживающие {action_name}:")
+                for i, model_name in enumerate(compatible_models, 1):
+                    model_info = self.models_by_name.get(model_name, {})
+                    description = model_info.get('description', 'Без описания')
+                    print(f"{i}. {model_name} — {description}")
+                
+                try:
+                    choice = input(f"\nПереключиться на совместимую модель? (1-{len(compatible_models)} или Enter для пропуска): ").strip()
+                    if choice and choice.isdigit():
+                        choice_idx = int(choice) - 1
+                        if 0 <= choice_idx < len(compatible_models):
+                            new_model = compatible_models[choice_idx]
+                            self.current_model = new_model
+                            print(f"✅ Переключились на модель: {new_model}")
+                            return True
+                except (ValueError, IndexError):
+                    pass
+            else:
+                print(f"\n❌ Нет доступных моделей для {action_name}!")
+            
+            return False
+        
+        return True
 
     def create_file(self, path, content=""):
         """Создает файл по указанному пути"""
@@ -656,6 +761,136 @@ class PollinationsAgent:
             return f"Ошибка генерации аудио: {str(e)}"
 
 
+    def analyze_audio(self, audio_path):
+        """Анализирует аудио файл и преобразует речь в текст"""
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(audio_path):
+                return f"Аудио файл не найден: {audio_path}"
+            
+            print(f"🎤 Анализ аудио файла: {audio_path}")
+            
+            # Получаем модели с поддержкой анализа аудио
+            audio_models = self.get_audio_models()
+            
+            if not audio_models:
+                return "❌ Нет доступных моделей с поддержкой анализа аудио! Убедитесь, что у вас есть совместимые модели."
+            
+            print(f"🔍 Доступные модели с поддержкой audio: {', '.join(audio_models)}")
+            
+            # Читаем аудио файл и конвертируем в base64
+            with open(audio_path, "rb") as audio_file:
+                audio_data = base64.b64encode(audio_file.read()).decode('utf-8')
+            
+            # Определяем формат аудио по расширению
+            _, ext = os.path.splitext(audio_path.lower())
+            audio_format = ext[1:] if ext else 'wav'  # убираем точку
+            
+            # Поддерживаемые форматы
+            if audio_format not in ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac']:
+                audio_format = 'wav'  # используем wav по умолчанию
+
+            if self.debug_mode:
+                print(f"📋 Формат аудио: {audio_format}")
+                print(f"📏 Размер данных: {len(audio_data)} символов base64")
+                print(f"💾 Размер файла: {os.path.getsize(audio_path)} байт")
+            
+            # Пробуем разные модели по очереди
+            for model_name in audio_models:
+                print(f"🤖 Пробуем модель: {model_name}")
+                
+                # Подготавливаем payload для Pollinations API
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Transcribe this audio and return only the transcribed text:"},
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": audio_data,
+                                        "format": audio_format
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "private": True
+                }
+                
+                # Подготавливаем заголовки
+                headers = {
+                    "Content-Type": "application/json"
+                }
+                
+                # Добавляем токен авторизации если есть
+                if self.api_token:
+                    headers["Authorization"] = f"Bearer {self.api_token}"
+                
+                print(f"🔄 Отправка аудио на транскрипцию с моделью {model_name}...")
+                
+                try:
+                    # Отправляем запрос
+                    response = requests.post(
+                        f"{self.base_text_url}/openai",
+                        json=payload,
+                        headers=headers,
+                        timeout=60  # Увеличиваем таймаут для аудио
+                    )
+                    if self.debug_mode:
+                        print(f"📊 HTTP статус ({model_name}): {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        print(f"📋 Получен ответ от API ({model_name})")
+                        
+                        if "choices" in result and len(result["choices"]) > 0:
+                            transcription = result["choices"][0]["message"].get("content", "")
+                            
+                            # Проверяем качество транскрипции
+                            print(f"📝 Транскрипция от {model_name}: {transcription[:100]}...")
+                            
+                            # Проверяем на ошибки транскрипции
+                            failed_responses = [
+                                "не удалось", "не могу", "ошибка", "failed", "error", "couldn't",
+                                "не получилось", "нет аудио", "no audio", "пустой файл", "empty file",
+                                "не поддерживается", "not supported", "invalid format"
+                            ]
+                            
+                            has_error = any(fail_word in transcription.lower() for fail_word in failed_responses)
+                            is_too_short = len(transcription.strip()) < 10
+                            
+                            if transcription and not has_error and not is_too_short:
+                                logger.info(f"Аудио транскрибировано моделью {model_name}: {audio_path}")
+                                return f"Транскрипция аудио файла {os.path.basename(audio_path)} (модель {model_name}):\n\n{transcription}"
+                            else:
+                                if has_error:
+                                    print(f"⚠️ Модель {model_name} сообщила об ошибке: {transcription[:100]}...")
+                                elif is_too_short:
+                                    print(f"⚠️ Модель {model_name} дала слишком короткий ответ: {transcription}")
+                                else:
+                                    print(f"⚠️ Модель {model_name} дала пустой ответ")
+                                continue
+                        else:
+                            print(f"❌ Неожиданный формат ответа от {model_name}: {result}")
+                            continue
+                    else:
+                        print(f"❌ Ошибка API ({model_name}): {response.status_code}")
+                        print(f"📝 Ответ сервера: {response.text[:500]}...")
+                        continue
+                        
+                except requests.RequestException as e:
+                    print(f"❌ Ошибка сети с моделью {model_name}: {str(e)}")
+                    continue
+            
+            # Если все модели не сработали
+            return f"❌ Не удалось транскрибировать аудио ни одной из моделей: {', '.join(audio_models)}. Возможно, формат аудио не поддерживается или требуется другой API токен."
+                
+        except Exception as e:
+            return f"Ошибка анализа аудио: {str(e)}"
+    
     def save_audio(self, audio_data, filename):
         """Сохраняет аудио в файл с отладочной информацией"""
         try:
@@ -1175,6 +1410,24 @@ class PollinationsAgent:
                     }
                 }
             },
+            # 🎤 Анализ аудио
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyzeAudio",
+                    "description": "Анализирует аудио файл и преобразует речь в текст с помощью Speech-to-Text API",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "audio_path": {
+                                "type": "string",
+                                "description": "Путь к аудио файлу для анализа"
+                            }
+                        },
+                        "required": ["audio_path"]
+                    }
+                }
+            },
             # 🔍 Распознавание текста
             {
                 "type": "function",
@@ -1285,7 +1538,60 @@ class PollinationsAgent:
                 if "Не выполнены действия:" in last_error:
                     # Задача выполнена частично, продолжаем недостающие действия
                     missing = last_error.replace("Не выполнены действия:", "").strip()
-                    prompt = f"""ПРОДОЛЖИ выполнение задачи: {user_task}
+                    
+                    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ АНАЛИЗА ИЗОБРАЖЕНИЙ
+                    if "анализ изображения" in missing and "listdirectory" in ' '.join(all_executed_actions).lower():
+                        prompt = f"""ЗАДАЧА: {user_task}
+
+ВНИМАНИЕ! Ты уже нашел файлы в директории, но НЕ ПРОАНАЛИЗИРОВАЛ изображение!
+
+ОБЯЗАТЕЛЬНО используй одну из этих функций для анализа:
+- findAndAnalyzeFile с запросом для поиска нужного файла
+- analyzeImage с конкретным путем к файлу изображения
+- readAdvancedFile с путем к файлу
+
+НЕ используй listDirectory снова! Файлы уже найдены, теперь нужен АНАЛИЗ!
+
+Пример правильного действия:
+findAndAnalyzeFile({{"query": "ico"}})
+или
+analyzeImage({{"image_path": "ico.ico"}})
+
+Выполни анализ изображения СЕЙЧАС!"""
+                    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ ПОИСКА ФАЙЛОВ (НЕ ПАПОК)
+                    elif any(word in user_task.lower() for word in ["ico", "файл", "изображение", "фото", "картинка"]) and any("ошибка" in action.lower() for action in all_executed_actions):
+                            # Определяем контекст: о чем конкретно спрашивает пользователь
+                            is_about_specific_file = "ico" in user_task.lower() and ("что изображено" in user_task.lower() or "анализ" in user_task.lower() or "покажи" in user_task.lower())
+                            
+                            if is_about_specific_file:
+                                prompt = f"""КРИТИЧЕСКАЯ ОШИБКА! Ты пытаешься найти ФАЙЛ неправильным способом!
+
+ЗАДАЧА: {user_task}
+
+АНАЛИЗ СИТУАЦИИ:
+Пользователь спрашивает о конкретном файле в текущей папке. Нужно:
+1. СНАЧАЛА посмотреть что есть в папке: listDirectory({{"path": "."}}) 
+2. ЗАТЕМ проанализировать найденный файл: findAndAnalyzeFile({{"query": "ico"}})
+
+АЛЬТЕРНАТИВНО, если знаешь точное имя файла:
+analyzeImage({{"image_path": "ico.ico"}}) - для файла ico.ico
+
+НИКОГДА НЕ ИСПОЛЬЗУЙ:
+❌ readFile('ico') без расширения 
+❌ listDirectory('ico') - ico это файл, не папка
+❌ downloadImage с выдуманными URL
+❌ Любые попытки скачать файл из интернета
+
+ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ:
+✅ 1. listDirectory({{"path": "."}}) - посмотреть файлы в папке
+✅ 2. findAndAnalyzeFile({{"query": "ico"}}) - найти и проанализировать
+
+ИЛИ НАПРЯМУЮ:
+✅ analyzeImage({{"image_path": "ico.ico"}}) - если знаешь точное имя
+
+Выполни ПРАВИЛЬНУЮ последовательность ПРЯМО СЕЙЧАС!"""
+                            else:
+                                prompt = f"""ПРОДОЛЖИ выполнение задачи: {user_task}
 
 Задача выполнена НЕ ПОЛНОСТЬЮ. Еще нужно выполнить: {missing}
 
@@ -1300,6 +1606,13 @@ class PollinationsAgent:
 ИНСТРУКЦИИ ДЛЯ РАБОТЫ С ЛЮБЫМИ ФАЙЛАМИ:
 -Сначала создай папку с тематическим названием
 -В папке создай требуемый файл
+
+ИНСТРУКЦИИ ДЛЯ ПОИСКА И АНАЛИЗА ФАЙЛОВ В ТЕКУЩЕЙ ПАПКЕ:
+- Если пользователь спрашивает о конкретном файле (ico, image, photo и т.д.) ВСЕГДА:
+  1. НЕ используй readFile для файлов изображений!
+  2. Используй findAndAnalyzeFile с названием файла: findAndAnalyzeFile({{"query": "ico"}})
+  3. ИЛИ если знаешь точное имя: analyzeImage({{"image_path": "ico.ico"}})
+  4. ИЛИ используй readAdvancedFile для автоматического определения типа
 
 ИНСТРУКЦИИ ДЛЯ ПЕРЕМЕЩЕНИЯ ФАЙЛОВ:
 - Если задача "перемести файлы из папок", то СНАЧАЛА используй listDirectory для каждой папки
@@ -1333,7 +1646,31 @@ class PollinationsAgent:
 
 Обязательно измени последовательность действий или используй другие инструменты!"""
             else:
-                prompt = f"""Выполни следующую задачу, используя доступные инструменты: {user_task}
+                # ОПТИМИЗАЦИЯ: Если в задаче есть анализ файлов/изображений, даем специальные инструкции
+                if any(word in user_task.lower() for word in ["что изображено", "что на фото", "что на картинке", "анализ изображения", "ico", "файл ico", "анализируй", "проанализируй"]):
+                    prompt = f"""Выполни задачу: {user_task}
+
+📋 ИНСТРУКЦИИ ДЛЯ АНАЛИЗА ФАЙЛОВ И ИЗОБРАЖЕНИЙ:
+
+✅ ПРАВИЛЬНО - для анализа файлов в текущей папке:
+1. findAndAnalyzeFile({{"query": "ico"}}) - найти и проанализировать файл с ico
+2. analyzeImage({{"image_path": "ico.ico"}}) - если знаешь точное имя файла
+3. readAdvancedFile({{"file_path": "ico.ico"}}) - автоматическое определение типа файла
+
+⚠️ НЕПРАВИЛЬНО - НЕ используй:
+❌ readFile('ico') - без расширения
+❌ listDirectory('ico') - ico это файл, не папка
+❌ downloadImage с выдуманными URL
+
+ОПЦИОНАЛЬНО: Можно сначала посмотреть что есть в папке:
+listDirectory({{"path": "."}}) - для просмотра всех файлов
+
+🎯 РЕКОМЕНДУЕМАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ:
+→ findAndAnalyzeFile({{"query": "ico"}}) - сразу найти и проанализировать!
+
+Выполни нужное действие СЕЙЧАС!"""
+                else:
+                    prompt = f"""Выполни следующую задачу, используя доступные инструменты: {user_task}
 
 ВАЖНО: Выполни ВСЕ требуемые действия в правильной последовательности!
 Если задача содержит несколько шагов ("затем", "потом", "а затем"), выполни их ВСЕ по порядку."""
@@ -1346,7 +1683,7 @@ class PollinationsAgent:
                 message = response["choices"][0]["message"]
                 
                 # Проверяем, есть ли вызовы инструментов
-                if "tool_calls" in message:
+                if "tool_calls" in message and message["tool_calls"] is not None:
                     print("\n🤖 AI выполняет задачу автоматически...")
                     success = True
                     error_details = []
@@ -1403,7 +1740,12 @@ class PollinationsAgent:
                         # Проверяем, выполнена ли задача полностью, учитывая ВСЕ действия
                         completion_check = self._check_task_completion(user_task, all_executed_actions)
                         if completion_check["complete"]:
-                            return "✅ Задача выполнена успешно!"
+                            # Если DEBUG_MODE=false, не показываем анализ для успешных задач
+                            if not self.debug_mode:
+                                return "✅ Задача выполнена успешно!"
+                            else:
+                                # В режиме отладки показываем полный анализ
+                                return "✅ Задача выполнена успешно!"
                         else:
                             print(f"\n⚠️ Задача выполнена не полностью: {completion_check['missing']}")
                             last_error = f"Не выполнены действия: {completion_check['missing']}"
@@ -1420,6 +1762,39 @@ class PollinationsAgent:
                         else:
                             return f"❌ Задача не выполнена после {max_attempts} попыток. Последние ошибки: {last_error}"
                 else:
+                    # Проверяем, поддерживает ли модель tools - если нет, даем предупреждение
+                    current_model_info = self.models_by_name.get(self.current_model, {})
+                    supports_tools = current_model_info.get('tools', False)
+                    current_modalities = current_model_info.get('input_modalities', [])
+                    
+                    if not supports_tools:
+                        # Получаем модели с поддержкой tools
+                        tools_compatible_models = [model['name'] for model in self.chat_models if model.get('tools', False)]
+                        
+                        if tools_compatible_models:
+                            print(f"\n⚠️ Модель '{self.current_model}' не поддерживает выполнение задач!")
+                            print(f"🎯 Поддерживаемые модальности: {', '.join(current_modalities)}")
+                            print(f"\n✅ Модели с поддержкой выполнения задач:")
+                            for i, model_name in enumerate(tools_compatible_models, 1):
+                                model_info = self.models_by_name.get(model_name, {})
+                                description = model_info.get('description', 'Без описания')
+                                print(f"{i}. {model_name} — {description}")
+                            
+                            try:
+                                choice = input(f"\nПереключиться на совместимую модель? (1-{len(tools_compatible_models)} или Enter для пропуска): ").strip()
+                                if choice and choice.isdigit():
+                                    choice_idx = int(choice) - 1
+                                    if 0 <= choice_idx < len(tools_compatible_models):
+                                        new_model = tools_compatible_models[choice_idx]
+                                        self.current_model = new_model
+                                        print(f"✅ Переключились на модель: {new_model}")
+                                        print(f"🔄 Попробуйте задачу снова")
+                                        return f"Модель переключена на {new_model}. Повторите задачу."
+                            except (ValueError, IndexError):
+                                pass
+                        
+                        return f"❌ Модель '{self.current_model}' не поддерживает выполнение задач. Выберите модель с поддержкой tools для выполнения задач."
+                    
                     # Если инструменты не вызваны, возвращаем план как текст
                     content = message.get("content", "")
                     if content:
@@ -1521,6 +1896,8 @@ class PollinationsAgent:
                 return self.read_advanced_file(function_args["file_path"])
             elif function_name == "analyzeImage":
                 return self.analyze_image(function_args["image_path"])
+            elif function_name == "analyzeAudio":
+                return self.analyze_audio(function_args["audio_path"])
             elif function_name == "recognizeText":
                 return self.recognize_text_from_image(function_args["image_path"])
             
@@ -2278,8 +2655,10 @@ python main.py
                 return self.read_excel_file(file_path)
             elif ext in ['.pptx', '.ppt']:
                 return self.read_powerpoint_file(file_path)
-            elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']:
+            elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico']:
                 return self.analyze_image(file_path)
+            elif ext in ['.wav', '.mp3', '.ogg', '.flac', '.m4a', '.aac']:
+                return self.analyze_audio(file_path)
             else:
                 # Пробуем прочитать как текстовый файл
                 return self.read_file(file_path)
@@ -2430,59 +2809,274 @@ python main.py
             if not os.path.exists(image_path):
                 return f"Изображение не найдено: {image_path}"
             
-            # Кодируем изображение в base64
-            with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+            print(f"🖼️ Анализируя изображение: {image_path}")
             
-            # Определяем MIME тип
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type or not mime_type.startswith('image/'):
-                mime_type = 'image/jpeg'  # Fallback
-            
-            # Отправляем запрос в Pollinations Vision API
-            payload = {
-                "model": "openai",  # Модель с поддержкой vision
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Проанализируй это изображение детально. Опиши что на нем изображено, цвета, объекты, текст (если есть), настроение, стиль и любые важные детали."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{image_data}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                "max_tokens": 500,
-                "private": True
-            }
-            
-            headers = {"Content-Type": "application/json"}
-            if self.api_token:
-                headers["Authorization"] = f"Bearer {self.api_token}"
-            
-            response = requests.post(
-                f"{self.base_text_url}/openai",
-                json=payload,
-                headers=headers
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            if "choices" in result and len(result["choices"]) > 0:
-                analysis = result["choices"][0]["message"].get("content", "")
-                logger.info(f"Изображение проанализировано: {image_path}")
-                return f"Анализ изображения {os.path.basename(image_path)}:\n\n{analysis}"
+            # Проверяем, является ли файл ICO и конвертируем в PNG если нужно
+            if image_path.lower().endswith('.ico'):
+                print(f"🔄 Конвертируем ICO в PNG для совместимости с API...")
+                try:
+                    if not PILLOW_AVAILABLE:
+                        return "❌ Для анализа ICO файлов требуется модуль Pillow. Установите: pip install Pillow"
+
+                    from PIL import Image
+                    
+                    # Открываем ICO и конвертируем в PNG
+                    with Image.open(image_path) as img:
+                        # Получаем все размеры иконки и выбираем самый большой
+                        if hasattr(img, 'n_frames') and img.n_frames > 1:
+                            # Ищем самый большой размер
+                            largest_size = 0
+                            largest_frame = 0
+                            for frame in range(img.n_frames):
+                                img.seek(frame)
+                                size = img.width * img.height
+                                if size > largest_size:
+                                    largest_size = size
+                                    largest_frame = frame
+                            img.seek(largest_frame)
+                        if self.debug_mode:
+                            print(f"📐 Размер иконки: {img.width}x{img.height}, режим: {img.mode}")
+                        
+                        # Увеличиваем маленькие иконки для лучшего анализа
+                        if img.width < 64 or img.height < 64:
+                            new_size = max(128, img.width * 4, img.height * 4)
+                            img = img.resize((new_size, new_size), Image.Resampling.LANCZOS)
+                            if self.debug_mode:
+                                print(f"🔍 Увеличили иконку до {new_size}x{new_size} для лучшего анализа")
+                        
+                        # Конвертируем в RGB если нужно
+                        if img.mode in ("RGBA", "LA"):
+                            background = Image.new("RGB", img.size, (255, 255, 255))
+                            background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+                            img = background
+                        elif img.mode not in ("RGB", "L"):
+                            img = img.convert("RGB")
+
+                        import io
+                        # Сохраняем в буфер как PNG с высоким качеством
+                        buffer = io.BytesIO()
+                        img.save(buffer, format='PNG', optimize=False)
+                        buffer.seek(0)
+                        
+                        # Кодируем в base64
+                        image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        mime_type = 'image/png'
+                        if self.debug_mode:
+                            print(f"✅ ICO успешно конвертирован в PNG")
+                        
+                except Exception as e:
+                    print(f"⚠️ Ошибка конвертации ICO: {e}")
+                    print(f"🔄 Пробуем загрузить ICO как есть...")
+                    # Fallback - загружаем как есть
+                    with open(image_path, "rb") as image_file:
+                        image_data = base64.b64encode(image_file.read()).decode('utf-8')
+                    mime_type = 'image/x-icon'
             else:
-                return "Не удалось получить анализ изображения"
+                # Кодируем изображение в base64 как обычно
+                with open(image_path, "rb") as image_file:
+                    image_data = base64.b64encode(image_file.read()).decode('utf-8')
                 
+                # Определяем MIME тип
+                mime_type, _ = mimetypes.guess_type(image_path)
+                if not mime_type or not mime_type.startswith('image/'):
+                    mime_type = 'image/jpeg'  # Fallback
+
+            if self.debug_mode:
+                print(f"📋 MIME тип: {mime_type}")
+                print(f"📏 Размер данных: {len(image_data)} символов base64")
+                print(f"💾 Размер файла: {os.path.getsize(image_path)} байт")
+            
+            # Проверяем размер - если слишком большой, пробуем сжать
+            if len(image_data) > 20000000:  # ~15MB в base64
+                print(f"⚠️ Изображение слишком большое, пробуем сжать...")
+                if PILLOW_AVAILABLE:
+                    try:
+                        from PIL import Image
+                        import io
+                        
+                        # Загружаем и сжимаем изображение
+                        with Image.open(image_path) as img:
+                            # Уменьшаем размер если нужно
+                            max_size = 1024
+                            if img.width > max_size or img.height > max_size:
+                                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                            
+                            # Конвертируем в RGB если нужно
+                            if img.mode not in ("RGB", "L"):
+                                if img.mode in ("RGBA", "LA"):
+                                    background = Image.new("RGB", img.size, (255, 255, 255))
+                                    background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+                                    img = background
+                                else:
+                                    img = img.convert("RGB")
+                            
+                            # Сохраняем с оптимизацией
+                            buffer = io.BytesIO()
+                            img.save(buffer, format='JPEG', quality=85, optimize=True)
+                            buffer.seek(0)
+                            
+                            image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                            mime_type = 'image/jpeg'
+                            print(f"✅ Изображение сжато до {len(image_data)} символов base64")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Ошибка сжатия: {e}")
+            
+            # Сначала проверяем текущую выбранную модель
+            current_model_name = getattr(self, 'current_model', self.default_model)
+            
+            # Получаем модели с поддержкой анализа изображений
+            vision_models = self.get_vision_models()
+            
+            if self.debug_mode:
+                print(f"🔍 Отладка: Текущая модель: {current_model_name}")
+                print(f"🔍 Отладка: Все доступные модели: {[model['name'] for model in self.chat_models]}")
+                print(f"🔍 Отладка: Модели с vision=true: {[model['name'] for model in self.chat_models if model.get('vision', False)]}")
+                print(f"🔍 Отладка: Модели с image в input_modalities: {[model['name'] for model in self.chat_models if 'image' in model.get('input_modalities', [])]}")
+            
+            if not vision_models:
+                # Если нет моделей через get_vision_models, попробуем найти через поле vision
+                fallback_vision_models = [model['name'] for model in self.chat_models if model.get('vision', False)]
+                if fallback_vision_models:
+                    if self.debug_mode:
+                        print(f"⚠️ Используем fallback поиск vision моделей: {fallback_vision_models}")
+                    vision_models = fallback_vision_models
+                else:
+                    error_msg = "❌ Нет доступных моделей с поддержкой анализа изображений!"
+                    if self.debug_mode:
+                        error_msg += f"\n🔍 Доступные модели: {[model['name'] for model in self.chat_models]}\n📊 Модели с полями vision/image: {[(model['name'], model.get('vision', False), 'image' in model.get('input_modalities', [])) for model in self.chat_models]}"
+                    return error_msg
+            
+            # Проверяем, поддерживает ли текущая модель изображения
+            if current_model_name in vision_models:
+                print(f"🤖 Используем текущую модель: {current_model_name}")
+                models_to_try = [current_model_name]
+            else:
+                print(f"⚠️ Текущая модель '{current_model_name}' не поддерживает изображения")
+                print(f"🔍 Доступные модели с поддержкой vision: {', '.join(vision_models)}")
+                models_to_try = vision_models
+            
+            for model_name in models_to_try:
+                print(f"🤖 Пробуем модель: {model_name}")
+                
+                # Создаем специализированный промпт для ICO файлов
+                if image_path.lower().endswith('.ico'):
+                    analysis_prompt = """Это файл иконки (.ico). Опиши что изображено на этой маленькой иконке. 
+Обращай внимание на:
+- Основные формы и объекты
+- Цвета (даже если их мало)
+- Символы, буквы или цифры
+- Общее назначение иконки (приложение, папка, действие и т.д.)
+- Стиль оформления
+
+Помни: это иконка, поэтому изображение может быть очень простым и схематичным."""
+                else:
+                    analysis_prompt = "Опиши что изображено на этой картинке. Расскажи подробно о том, что ты видишь: объекты, цвета, детали, текст (если есть), общее содержание."
+                
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": analysis_prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime_type};base64,{image_data}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 500,
+                    "temperature": 0.1,
+                    "private": True
+                }
+                
+                headers = {"Content-Type": "application/json"}
+                if self.api_token:
+                    headers["Authorization"] = f"Bearer {self.api_token}"
+                if self.debug_mode:
+                    print(f"🔄 Отправляем запрос к Vision API с моделью {model_name}...")
+                    print(f"📦 Размер payload: {len(str(payload))} символов")
+                
+                try:
+                    response = requests.post(
+                        f"{self.base_text_url}/openai",
+                        json=payload,
+                        headers=headers,
+                        timeout=30
+                    )
+                    
+                    print(f"📊 HTTP статус ({model_name}): {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if self.debug_mode:
+                            print(f"📋 Получен ответ от API ({model_name})")
+                            print(f"🔍 Структура ответа: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+                        
+                        if "choices" in result and len(result["choices"]) > 0:
+                            analysis = result["choices"][0]["message"].get("content", "")
+                            
+                            # Проверяем, что анализ не пустой и содержательный
+                            print(f"📝 Ответ от {model_name}: {analysis[:150]}...")
+                            
+                            # Проверяем на неуспешные ответы
+                            failed_responses = [
+                                "не загрузилось", "не отображается", "не получил", "не могу", 
+                                "попробуй снова", "couldn't", "can't see", "no image", 
+                                "image failed", "not loaded", "try again", "снова отправить",
+                                "изображение не", "картинка не", "не вижу", "не удалось",
+                                "ошибка загрузки", "файл не найден"
+                            ]
+                            
+                            has_failed_response = any(fail_word in analysis.lower() for fail_word in failed_responses)
+                            is_too_short = len(analysis.strip()) < 30
+                            
+                            if analysis and not has_failed_response and not is_too_short:
+                                logger.info(f"Изображение проанализировано моделью {model_name}: {image_path}")
+                                return f"Анализ изображения {os.path.basename(image_path)} (модель {model_name}):\n\n{analysis}"
+                            else:
+                                if has_failed_response:
+                                    print(f"⚠️ Модель {model_name} не смогла загрузить изображение: {analysis[:100]}...")
+                                elif is_too_short:
+                                    print(f"⚠️ Модель {model_name} дала слишком короткий ответ: {analysis}")
+                                else:
+                                    print(f"⚠️ Модель {model_name} дала неполный ответ: {analysis[:100]}...")
+                                continue
+                        else:
+                            print(f"❌ Неожиданный формат ответа от {model_name}: {result}")
+                            continue
+                    else:
+                        print(f"❌ Ошибка API ({model_name}): {response.status_code}")
+                        print(f"📝 Ответ сервера: {response.text[:500]}...")
+                        continue
+                        
+                except requests.RequestException as e:
+                    print(f"❌ Ошибка сети с моделью {model_name}: {str(e)}")
+                    continue
+            
+            # Если все модели не сработали
+            return f"❌ Не удалось проанализировать изображение ни одной из моделей: {', '.join(vision_models)}. Возможно, формат изображения не поддерживается или требуется другой API токен."
+                
+        except requests.RequestException as e:
+            error_msg = str(e)
+            print(f"❌ Ошибка сети: {error_msg}")
+            if "400" in error_msg or "Bad Request" in error_msg:
+                return "❌ Ошибка 400: Неверный формат запроса к Vision API. Проверьте формат изображения или размер файла."
+            elif "401" in error_msg or "Unauthorized" in error_msg:
+                return "❌ Ошибка 401: Неверный или отсутствующий API токен. Получите токен на https://auth.pollinations.ai/"
+            elif "402" in error_msg or "Payment Required" in error_msg:
+                return "❌ Ошибка 402: Требуется оплата или валидный токен. Получите токен на https://auth.pollinations.ai/"
+            else:
+                return f"Ошибка анализа изображения: {error_msg}"
         except Exception as e:
+            print(f"❌ Общая ошибка: {str(e)}")
             return f"Ошибка анализа изображения: {str(e)}"
     
     def recognize_text_from_image(self, image_path):
@@ -2713,8 +3307,18 @@ python main.py
                 # Распознавание текста
                 return self.recognize_text_from_image(target_file)
             else:
-                # Обычный анализ файла
-                return self.read_advanced_file(target_file)
+                # Определяем тип файла для правильного анализа
+                _, ext = os.path.splitext(target_file.lower())
+                
+                # Для изображений (включая .ico) всегда используем анализ изображений
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico']:
+                    return self.analyze_image(target_file)
+                # Для аудио файлов используем анализ аудио
+                elif ext in ['.wav', '.mp3', '.ogg', '.flac', '.m4a', '.aac']:
+                    return self.analyze_audio(target_file)
+                else:
+                    # Для остальных файлов используем обычное чтение
+                    return self.read_advanced_file(target_file)
                 
         except Exception as e:
             return f"Ошибка поиска и анализа файла: {str(e)}"
@@ -3183,6 +3787,26 @@ python main.py
                         missing_count = expected_deletions - actual_deletions
                         step_missing.append(f"удаление папок: {missing_count} из {expected_deletions} (шаг {i+1})")
                 
+                # Проверяем анализ изображений - более строгая проверка
+                if any(word in step for word in ["что изображено", "что на изображении", "что на фото", "что на картинке", "анализ изображения", "опиши изображение", "опиши фото", "фото ico", "изображение ico", "картинка ico", "что на ico", "анализ ico"]):
+                    # Если в задаче есть анализ изображений, ОБЯЗАТЕЛЬНО должна быть одна из этих функций
+                    has_image_analysis = ("analyzeimage" in executed_str or 
+                                        "readadvancedfile" in executed_str or 
+                                        "findandanalyzefile" in executed_str)
+                    
+                    # Простое listDirectory НЕ считается анализом изображения
+                    only_listed_directory = ("listdirectory" in executed_str and 
+                                           not has_image_analysis)
+                    
+                    # Если не было анализа или было только сканирование, добавляем анализ
+                    if not has_image_analysis or only_listed_directory:
+                        step_missing.append(f"анализ изображения (шаг {i+1})")
+                
+                # Проверяем анализ аудио
+                if any(word in step for word in ["что в аудио", "транскрипция", "что говорит", "что сказано", "анализ аудио"]):
+                    if "analyzeaudio" not in executed_str and "readadvancedfile" not in executed_str:
+                        step_missing.append(f"анализ аудио (шаг {i+1})")
+                
                 # Проверяем загрузку/генерацию
                 if any(word in step for word in ["скачай", "загрузи", "сохрани"]):
                     if "downloadimage" not in executed_str and "downloadfile" not in executed_str and "generateimage" not in executed_str:
@@ -3215,7 +3839,12 @@ python main.py
             # Добавляем ключевые слова для чтения файлов
             "прочитай", "прочти", "читай", "что написано", "содержимое", "содержание", "текст из",
             "что в файле", "что в документе", "посмотри файл", "покажи файл", "файл содержит",
-            "read file", "show file", "file content", "file contains"
+            "read file", "show file", "file content", "file contains",
+            # Добавляем ключевые слова для анализа изображений и файлов
+            "что изображено", "что на изображении", "что на фото", "что на картинке", "что на ico", 
+            "анализ изображения", "опиши изображение", "опиши фото", "анализируй", "проанализируй",
+            "ico", ".ico", "иконка", "значок", "icon", "в папке", "в каталоге", "в директории",
+            "в этой папке", "в этом каталоге", "в этой директории", "файл ico", "изображение ico"
         ]
         
         # Специальная проверка для аудио запросов
