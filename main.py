@@ -13,6 +13,8 @@ import platform
 import mimetypes
 import psutil
 import io
+import datetime
+import time
 
 from tqdm import tqdm
 from loguru import logger
@@ -62,7 +64,7 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-CURRENT_VERSION = "1.3"
+CURRENT_VERSION = "1.4"
 
 def open_file_with_default_program(file_path):
     try:
@@ -393,6 +395,9 @@ class PollinationsAgent:
             "changeRegistryValue": self.change_registry_value,
             "getSystemInfo": self.get_system_info,
             "manageServices": self.manage_services,
+            "clearBin":self.clearBin,
+            "listStartupPrograms": self.list_startup_programs,
+            "manageStartupProgram": self.manage_startup_program,
             
             # 🔍 Поиск изображений
             "searchAndDownloadImages": self.search_and_download_images,
@@ -656,6 +661,99 @@ class PollinationsAgent:
             logger.warning(f"Не удалось получить список голосов: {e}")
             # Возвращаем стандартные голоса OpenAI
             return ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+
+    def clearBin(self):
+        """Очищает корзину Windows"""
+        try:
+            # Пробуем несколько способов очистки корзины
+            methods = [
+                # Способ 1: PowerShell Clear-RecycleBin с подавлением ошибок
+                {
+                    "command": ["powershell", "-Command", "try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue; Write-Output 'Success' } catch { Write-Output 'Success' }"],
+                    "name": "PowerShell Clear-RecycleBin"
+                },
+                # Способ 2: Альтернативный PowerShell скрипт
+                {
+                    "command": ["powershell", "-Command", "$shell = New-Object -ComObject Shell.Application; $recycleBin = $shell.Namespace(10); $recycleBin.Items() | ForEach-Object { $_.InvokeVerb('delete') }; Write-Output 'Success'"],
+                    "name": "PowerShell COM объект"
+                },
+                # Способ 3: CMD команда
+                {
+                    "command": ["cmd", "/c", "rd /s /q %systemdrive%\\$Recycle.Bin 2>nul && echo Success || echo Success"],
+                    "name": "CMD rd команда"
+                }
+            ]
+            
+            for method in methods:
+                try:
+                    print(f"🔄 Попытка очистки корзины методом: {method['name']}")
+                    
+                    result = subprocess.run(
+                        method["command"], 
+                        capture_output=True, 
+                        text=True, 
+                        check=False,
+                        encoding='utf-8',
+                        errors='ignore'  # Игнорируем ошибки кодировки
+                    )
+                    
+                    # Если команда выполнилась (независимо от return code)
+                    # и нет критических ошибок в выводе
+                    output = result.stdout.strip() if result.stdout else ""
+                    error_output = result.stderr.strip() if result.stderr else ""
+                    
+                    # Проверяем на успешное выполнение
+                    success_indicators = ["Success", "success", "SUCCESS"]
+                    is_success = any(indicator in output for indicator in success_indicators)
+                    
+                    # Или если нет критических ошибок
+                    critical_errors = [
+                        "Access is denied",
+                        "Доступ запрещен", 
+                        "Cannot find",
+                        "Не удается найти",
+                        "Invalid",
+                        "Недопустимый"
+                    ]
+                    has_critical_error = any(error in error_output.lower() for error in [e.lower() for e in critical_errors])
+                    
+                    if is_success or (result.returncode == 0 and not has_critical_error):
+                        logger.info(f"Корзина очищена методом: {method['name']}")
+                        return "✅ Корзина успешно очищена"
+                    
+                    # Если этот метод не сработал, пробуем следующий
+                    print(f"⚠️ Метод {method['name']} не сработал, пробуем следующий...")
+                    continue
+                    
+                except Exception as method_error:
+                    print(f"⚠️ Ошибка с методом {method['name']}: {str(method_error)}")
+                    continue
+            
+            # Если все методы не сработали, делаем финальную попытку проверки
+            # Проверяем, действительно ли корзина пустая
+            try:
+                check_result = subprocess.run(
+                    ["powershell", "-Command", "(Get-ChildItem -Path '$env:systemdrive\\$Recycle.Bin' -Force -ErrorAction SilentlyContinue | Measure-Object).Count"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    encoding='utf-8',
+                    errors='ignore'
+                )
+                
+                if check_result.stdout.strip() == "0":
+                    logger.info("Корзина очищена (подтверждено проверкой)")
+                    return "✅ Корзина успешно очищена (подтверждено проверкой)"
+                    
+            except Exception:
+                pass
+            
+            # Если ничего не помогло, возвращаем более мягкое сообщение
+            logger.warning("Не удалось однозначно определить результат очистки корзины")
+            return "⚠️ Команда очистки корзины выполнена. Возможно, корзина была уже пуста или очищена успешно."
+            
+        except Exception as e:
+            return f"❌ Критическая ошибка очистки корзины: {str(e)}"
 
     def check_answear(self):
         if not self.api_token:
@@ -1356,6 +1454,69 @@ class PollinationsAgent:
                     }
                 }
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "manageServices",
+                    "description": "Управление службами Windows (start, stop, restart, status)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service_name": {
+                                "type": "string",
+                                "description": "Имя службы для управления"
+                            },
+                            "action": {
+                                "type": "string",
+                                "description": "Действие: start, stop, restart, status",
+                                "enum": ["start", "stop", "restart", "status"]
+                            },
+                            "require_confirmation": {
+                                "type": "boolean",
+                                "description": "Требовать подтверждение пользователя",
+                                "default": True
+                            }
+                        },
+                        "required": ["service_name", "action"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "changeRegistryValue",
+                    "description": "Изменяет значение в реестре Windows (требует подтверждения)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key_path": {
+                                "type": "string",
+                                "description": "Путь к ключу реестра"
+                            },
+                            "value_name": {
+                                "type": "string",
+                                "description": "Имя параметра"
+                            },
+                            "value_data": {
+                                "type": "string",
+                                "description": "Значение параметра"
+                            },
+                            "value_type": {
+                                "type": "string",
+                                "description": "Тип параметра: REG_SZ, REG_DWORD, REG_BINARY",
+                                "default": "REG_SZ",
+                                "enum": ["REG_SZ", "REG_DWORD", "REG_BINARY"]
+                            },
+                            "require_confirmation": {
+                                "type": "boolean",
+                                "description": "Требовать подтверждение пользователя",
+                                "default": True
+                            }
+                        },
+                        "required": ["key_path", "value_name", "value_data"]
+                    }
+                }
+            },
             # 🔍 Поиск и анализ файлов
             {
                 "type": "function",
@@ -1512,7 +1673,71 @@ class PollinationsAgent:
                         "required": ["file_path"]
                     }
                 }
-            }
+            },
+        #     Очистка корзины
+            {
+                "type": "function",
+                "function": {
+                    "name": "clearBin",
+                    "description": "Очистка корзины",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                        }
+                    }
+                }
+            },
+            # 🚀 Автозагрузка
+            {
+                "type": "function",
+                "function": {
+                    "name": "listStartupPrograms",
+                    "description": "Показывает список программ в автозагрузке",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "manageStartupProgram",
+                    "description": "Управляет программами в автозагрузке (add, remove, list)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "program_name": {
+                                "type": "string",
+                                "description": "Имя программы для управления"
+                            },
+                            "action": {
+                                "type": "string",
+                                "description": "Действие: add, remove, list",
+                                "enum": ["add", "remove", "list"]
+                            },
+                            "program_path": {
+                                "type": "string",
+                                "description": "Путь к программе (для добавления)",
+                                "default": ""
+                            },
+                            "location": {
+                                "type": "string",
+                                "description": "Место автозагрузки: current_user или all_users",
+                                "default": "current_user",
+                                "enum": ["current_user", "all_users"]
+                            },
+                            "require_confirmation": {
+                                "type": "boolean",
+                                "description": "Требовать подтверждение пользователя",
+                                "default": True
+                            }
+                        },
+                        "required": ["program_name", "action"]
+                    }
+                }
+            },
         ]
         return tools
 
@@ -1549,6 +1774,7 @@ class PollinationsAgent:
 - findAndAnalyzeFile с запросом для поиска нужного файла
 - analyzeImage с конкретным путем к файлу изображения
 - readAdvancedFile с путем к файлу
+- clearBin используй для очистки корзины
 
 НЕ используй listDirectory снова! Файлы уже найдены, теперь нужен АНАЛИЗ!
 
@@ -1888,6 +2114,32 @@ listDirectory({{"path": "."}}) - для просмотра всех файлов
             # ⚙️ Системная информация
             elif function_name == "getSystemInfo":
                 return self.get_system_info()
+            elif function_name == "clearBin":
+                return self.clearBin()
+            elif function_name == "manageServices":
+                return self.manage_services(
+                    function_args["service_name"],
+                    function_args["action"],
+                    function_args.get("require_confirmation", True)
+                )
+            elif function_name == "changeRegistryValue":
+                return self.change_registry_value(
+                    function_args["key_path"],
+                    function_args["value_name"],
+                    function_args["value_data"],
+                    function_args.get("value_type", "REG_SZ"),
+                    function_args.get("require_confirmation", True)
+                )
+            elif function_name == "listStartupPrograms":
+                return self.list_startup_programs()
+            elif function_name == "manageStartupProgram":
+                return self.manage_startup_program(
+                    function_args["program_name"],
+                    function_args["action"],
+                    function_args.get("program_path", ""),
+                    function_args.get("location", "current_user"),
+                    function_args.get("require_confirmation", True)
+                )
             
             # 🔍 Поиск и анализ файлов
             elif function_name == "findAndAnalyzeFile":
@@ -2225,7 +2477,26 @@ listDirectory({{"path": "."}}) - для просмотра всех файлов
     def get_system_info(self):
         """Получает информацию о системе"""
         try:
-            
+            import socket
+            import requests
+
+            # Получаем информацию о видеокарте
+            gpu_info = subprocess.run(
+                ["powershell", "-Command",
+                 "Get-WmiObject Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion"],
+                capture_output=True,
+                text=True
+            )
+
+            # Декодируем вывод с заменой недопустимых символов
+            gpu_output = gpu_info.stdout.encode('cp1251', errors='replace').decode('utf-8',
+                                                                                   errors='replace').strip().split(
+                '\n')[1:]
+
+            # Форматируем вывод информации о видеокарте
+            gpu_details = [line.strip() for line in gpu_output if line.strip()]  # Убираем пустые строки
+
+            # Собираем информацию в словарь
             info = {
                 "Операционная система": platform.system(),
                 "Версия ОС": platform.version(),
@@ -2233,11 +2504,70 @@ listDirectory({{"path": "."}}) - для просмотра всех файлов
                 "Процессор": platform.processor(),
                 "Имя компьютера": platform.node(),
                 "Пользователь": os.getenv('USERNAME', 'Неизвестно'),
-                "RAM (ГБ)": round(psutil.virtual_memory().total / (1024**3), 2),
-                "Свободная RAM (ГБ)": round(psutil.virtual_memory().available / (1024**3), 2),
+                "RAM (ГБ)": round(psutil.virtual_memory().total / (1024 ** 3), 2),
+                "Свободная RAM (ГБ)": round(psutil.virtual_memory().available / (1024 ** 3), 2),
                 "Загрузка CPU (%)": psutil.cpu_percent(),
-                "Количество ядер": psutil.cpu_count()
+                "Количество ядер": psutil.cpu_count(),
+                "Информация о видеокарте": gpu_details
             }
+            
+            # Получаем локальный IP адрес
+            try:
+                # Подключаемся к внешнему серверу, чтобы определить локальный IP
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.connect(("8.8.8.8", 80))
+                local_ip = sock.getsockname()[0]
+                sock.close()
+                info["Локальный IP"] = local_ip
+            except Exception:
+                info["Локальный IP"] = "Не удалось определить"
+            
+            # Получаем публичный IP адрес
+            try:
+                # Попробуем несколько сервисов для получения публичного IP
+                public_ip_services = [
+                    "https://httpbin.org/ip",
+                    "https://api.ipify.org?format=json",
+                    "https://ifconfig.me/ip"
+                ]
+                
+                public_ip = "Не удалось определить"
+                for service in public_ip_services:
+                    try:
+                        response = requests.get(service, timeout=5)
+                        if response.status_code == 200:
+                            if "json" in response.headers.get('content-type', '').lower():
+                                data = response.json()
+                                if 'ip' in data:
+                                    public_ip = data['ip']
+                                elif 'origin' in data:
+                                    public_ip = data['origin']
+                                break
+                            else:
+                                public_ip = response.text.strip()
+                                break
+                    except Exception:
+                        continue
+                
+                info["Публичный IP"] = public_ip
+            except Exception:
+                info["Публичный IP"] = "Не удалось определить"
+            
+            # Получаем MAC адреса всех сетевых интерфейсов
+            try:
+                network_interfaces = {}
+                for interface_name, interface_addresses in psutil.net_if_addrs().items():
+                    for address in interface_addresses:
+                        if address.family == psutil.AF_LINK:  # MAC адрес
+                            if address.address and address.address != "00:00:00:00:00:00":
+                                network_interfaces[interface_name] = address.address
+                
+                if network_interfaces:
+                    info["Сетевые интерфейсы (MAC)"] = network_interfaces
+                else:
+                    info["Сетевые интерфейсы (MAC)"] = "Не найдено"
+            except Exception:
+                info["Сетевые интерфейсы (MAC)"] = "Ошибка получения MAC адресов"
             
             return json.dumps(info, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -2246,6 +2576,13 @@ listDirectory({{"path": "."}}) - для просмотра всех файлов
     def manage_services(self, service_name, action, require_confirmation=True):
         """Управление службами Windows"""
         try:
+            # Если имя службы пустое и действие "status", показываем все службы
+            if not service_name and action == 'status':
+                return self._list_all_services()
+            
+            if not service_name:
+                return "Ошибка: Не указано имя службы"
+                
             if require_confirmation:
                 print(f"⚠️ Запрос на управление службой:")
                 print(f"Служба: {service_name}")
@@ -2266,16 +2603,425 @@ listDirectory({{"path": "."}}) - для просмотра всех файлов
                 command = f"sc stop {service_name}"
             elif action == 'restart':
                 # Сначала останавливаем, потом запускаем
-                stop_result = subprocess.run(f"sc stop {service_name}", shell=True, capture_output=True, text=True)
-                start_result = subprocess.run(f"sc start {service_name}", shell=True, capture_output=True, text=True)
+                stop_result = subprocess.run(
+                    f"sc stop {service_name}", 
+                    shell=True, 
+                    capture_output=True, 
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore'
+                )
+                start_result = subprocess.run(
+                    f"sc start {service_name}", 
+                    shell=True, 
+                    capture_output=True, 
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore'
+                )
                 return f"Остановка: {stop_result.stdout}\nЗапуск: {start_result.stdout}"
             
-            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                capture_output=True, 
+                text=True,
+                encoding='utf-8',
+                errors='ignore'  # Игнорируем ошибки кодировки
+            )
             
             logger.info(f"Управление службой {service_name}: {action}")
             return f"Результат: {result.stdout}\nОшибки: {result.stderr}"
         except Exception as e:
             return f"Ошибка управления службой: {str(e)}"
+    
+    def _list_all_services(self):
+        """Показывает список всех служб Windows"""
+        try:
+            # Пробуем несколько способов получения списка служб
+            methods = [
+                # Метод 1: PowerShell Get-Service
+                ["powershell", "-Command", "Get-Service | Where-Object {$_.Status -eq 'Running'} | Select-Object -First 20 | Format-Table Name, Status -HideTableHeaders"],
+                # Метод 2: sc query
+                ["sc", "query", "state=running"],
+                # Метод 3: net start
+                ["net", "start"]
+            ]
+            
+            for method in methods:
+                try:
+                    result = subprocess.run(
+                        method, 
+                        capture_output=True, 
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        timeout=10
+                    )
+                    
+                    if result.returncode == 0 and result.stdout:
+                        services_output = result.stdout
+                        
+                        # Разные способы парсинга в зависимости от метода
+                        services = []
+                        
+                        if "powershell" in method[0]:
+                            # Парсим PowerShell вывод
+                            lines = services_output.strip().split('\n')
+                            for line in lines:
+                                line = line.strip()
+                                if line and not line.startswith('---') and 'Running' in line:
+                                    parts = line.split()
+                                    if len(parts) >= 2:
+                                        service_name = parts[0]
+                                        if service_name and service_name != 'Name':
+                                            services.append(service_name)
+                        
+                        elif "sc" in method[0]:
+                            # Парсим sc query вывод
+                            import re
+                            service_pattern = r'SERVICE_NAME:\s*(.+?)\r?\n'
+                            services = re.findall(service_pattern, services_output, re.IGNORECASE)
+                        
+                        elif "net" in method[0]:
+                            # Парсим net start вывод
+                            lines = services_output.strip().split('\n')
+                            for line in lines[2:]:  # Пропускаем заголовки
+                                line = line.strip()
+                                if line and not line.startswith('The command completed'):
+                                    services.append(line)
+                        
+                        if services:
+                            # Ограничиваем количество показываемых служб
+                            limited_services = services[:20]  # Показываем первые 20
+                            
+                            result_text = f"🔍 Запущенные службы Windows (показано {len(limited_services)} из {len(services)}):"                   
+                            
+                            for i, service in enumerate(limited_services, 1):
+                                result_text += f"\n{i}. {service.strip()}"
+                            
+                            if len(services) > 20:
+                                result_text += f"\n\nℹ️ И ещё {len(services) - 20} служб..."
+                            
+                            result_text += f"\n\n📊 Общее количество запущенных служб: {len(services)}"
+                            
+                            return result_text
+                        
+                except subprocess.TimeoutExpired:
+                    continue
+                except Exception as e:
+                    continue
+            
+            # Если ни один метод не сработал
+            return "⚠️ Не удалось получить список запущенных служб ни одним из доступных методов"
+                
+        except Exception as e:
+            return f"❌ Ошибка получения списка служб: {str(e)}"
+    
+    def list_startup_programs(self):
+        """Показывает программы в автозагрузке с расширенной информацией"""
+        try:
+            startup_items = []
+            
+            # Проверяем различные места автозагрузки
+            
+            # 1. Реестр - Current User
+            try:
+                import winreg
+                import datetime
+                reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
+                i = 0
+                while True:
+                    try:
+                        name, value, _ = winreg.EnumValue(reg_key, i)
+                        # Попытка получить время изменения ключа реестра
+                        try:
+                            key_info = winreg.QueryInfoKey(reg_key)
+                            modified_time = datetime.datetime.fromtimestamp(key_info[2]/10000000.0 - 11644473600)
+                            timestamp = modified_time.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            timestamp = "Неизвестно"
+                        
+                        startup_items.append({
+                            "name": name,
+                            "path": value,
+                            "location": "HKEY_CURRENT_USER\\Run",
+                            "type": "Registry",
+                            "timestamp": timestamp,
+                            "source": "Registry (Current User)"
+                        })
+                        i += 1
+                    except WindowsError:
+                        break
+                winreg.CloseKey(reg_key)
+            except Exception:
+                pass
+            
+            # 2. Реестр - Local Machine
+            try:
+                reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
+                i = 0
+                while True:
+                    try:
+                        name, value, _ = winreg.EnumValue(reg_key, i)
+                        # Попытка получить время изменения ключа реестра
+                        try:
+                            key_info = winreg.QueryInfoKey(reg_key)
+                            modified_time = datetime.datetime.fromtimestamp(key_info[2]/10000000.0 - 11644473600)
+                            timestamp = modified_time.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            timestamp = "Неизвестно"
+                        
+                        startup_items.append({
+                            "name": name,
+                            "path": value,
+                            "location": "HKEY_LOCAL_MACHINE\\Run",
+                            "type": "Registry",
+                            "timestamp": timestamp,
+                            "source": "Registry (Local Machine)"
+                        })
+                        i += 1
+                    except WindowsError:
+                        break
+                winreg.CloseKey(reg_key)
+            except Exception:
+                pass
+            
+            # 3. Папка автозагрузки - Current User
+            try:
+                startup_folder = os.path.expanduser("~\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup")
+                if os.path.exists(startup_folder):
+                    for file in os.listdir(startup_folder):
+                        if file.endswith(('.lnk', '.exe', '.bat', '.cmd')):
+                            file_path = os.path.join(startup_folder, file)
+                            try:
+                                # Получаем время создания файла
+                                import time
+                                creation_time = os.path.getctime(file_path)
+                                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(creation_time))
+                            except:
+                                timestamp = "Неизвестно"
+                            
+                            startup_items.append({
+                                "name": file,
+                                "path": file_path,
+                                "location": "Startup Folder (User)",
+                                "type": "Folder",
+                                "timestamp": timestamp,
+                                "source": "Startup Folder (Current User)"
+                            })
+            except Exception:
+                pass
+            
+            # 4. Папка автозагрузки - All Users
+            try:
+                startup_folder_all = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+                if os.path.exists(startup_folder_all):
+                    for file in os.listdir(startup_folder_all):
+                        if file.endswith(('.lnk', '.exe', '.bat', '.cmd')):
+                            file_path = os.path.join(startup_folder_all, file)
+                            try:
+                                # Получаем время создания файла
+                                import time
+                                creation_time = os.path.getctime(file_path)
+                                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(creation_time))
+                            except:
+                                timestamp = "Неизвестно"
+                            
+                            startup_items.append({
+                                "name": file,
+                                "path": file_path,
+                                "location": "Startup Folder (All Users)",
+                                "type": "Folder",
+                                "timestamp": timestamp,
+                                "source": "Startup Folder (All Users)"
+                            })
+            except Exception:
+                pass
+            
+            # 5. Планировщик задач Windows
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['schtasks', '/query', '/fo', 'csv', '/v'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    lines = result.stdout.strip().split('\n')
+                    if len(lines) > 1:  # Есть заголовок и данные
+                        headers = [h.strip('"') for h in lines[0].split(',')]
+                        
+                        for line in lines[1:]:
+                            if line.strip():
+                                try:
+                                    # Парсим CSV строку
+                                    import csv
+                                    import io
+                                    reader = csv.reader(io.StringIO(line))
+                                    row = next(reader)
+                                    
+                                    if len(row) >= len(headers):
+                                        task_data = dict(zip(headers, row))
+                                        task_name = task_data.get('TaskName', '').strip()
+                                        
+                                        # Фильтруем задачи, которые запускаются при входе или загрузке
+                                        triggers = task_data.get('Triggers', '').lower()
+                                        if ('logon' in triggers or 'startup' in triggers or 'boot' in triggers) and task_name:
+                                            startup_items.append({
+                                                "name": task_name.replace('\\', ''),
+                                                "path": task_data.get('Task To Run', ''),
+                                                "location": "Task Scheduler",
+                                                "type": "Scheduled Task",
+                                                "timestamp": task_data.get('Created Date', 'Неизвестно'),
+                                                "source": "Windows Task Scheduler",
+                                                "status": task_data.get('Status', ''),
+                                                "next_run": task_data.get('Next Run Time', '')
+                                            })
+                                except:
+                                    continue
+            except Exception:
+                pass
+            
+            # 6. WMI автозагрузка
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['wmic', 'startup', 'get', 'name,command,location', '/format:csv'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines[1:]:  # Пропускаем заголовок
+                        if line.strip():
+                            try:
+                                parts = line.split(',')
+                                if len(parts) >= 4:
+                                    name = parts[2].strip()
+                                    command = parts[1].strip()
+                                    location = parts[3].strip()
+                                    
+                                    if name and command:
+                                        startup_items.append({
+                                            "name": name,
+                                            "path": command,
+                                            "location": location,
+                                            "type": "WMI",
+                                            "timestamp": "Неизвестно",
+                                            "source": "WMI Startup"
+                                        })
+                            except:
+                                continue
+            except Exception:
+                pass
+            
+            # Удаляем дубликаты
+            unique_items = []
+            seen = set()
+            for item in startup_items:
+                key = (item['name'].lower(), item['path'].lower())
+                if key not in seen:
+                    seen.add(key)
+                    unique_items.append(item)
+            
+            # Формируем отчёт
+            if unique_items:
+                result = f"🚀 Программы в автозагрузке (найдено {len(unique_items)} уникальных):\n"
+                
+                for i, item in enumerate(unique_items, 1):
+                    result += f"\n{i}. 📝 {item['name']}"
+                    result += f"\n   📁 Источник: {item['source']}"
+                    result += f"\n   🔗 Расположение: {item['location']}"
+                    result += f"\n   💾 Путь: {item['path'][:80]}{'...' if len(item['path']) > 80 else ''}"
+                    result += f"\n   📂 Тип: {item['type']}"
+                    result += f"\n   🕒 Время добавления: {item['timestamp']}"
+                    
+                    # Дополнительная информация для запланированных задач
+                    if item['type'] == 'Scheduled Task':
+                        if item.get('status'):
+                            result += f"\n   ⚡ Статус: {item['status']}"
+                        if item.get('next_run'):
+                            result += f"\n   ⏰ Следующий запуск: {item['next_run']}"
+                    
+                    result += "\n"
+                
+                # Статистика по источникам
+                sources = {}
+                for item in unique_items:
+                    source = item['source']
+                    sources[source] = sources.get(source, 0) + 1
+                
+                result += "\n📊 Статистика по источникам:\n"
+                for source, count in sources.items():
+                    result += f"   • {source}: {count} программ(а)\n"
+                
+                return result
+            else:
+                return "🚀 Программы в автозагрузке не обнаружены"
+                
+        except Exception as e:
+            return f"❌ Ошибка получения списка автозагрузки: {str(e)}"
+    
+    def manage_startup_program(self, program_name, action, program_path="", location="current_user", require_confirmation=True):
+        """Управляет программами в автозагрузке"""
+        try:
+            if require_confirmation:
+                print(f"⚠️ Запрос на управление автозагрузкой:")
+                print(f"Программа: {program_name}")
+                print(f"Действие: {action}")
+                if program_path:
+                    print(f"Путь: {program_path}")
+                confirm = input("Разрешить изменение автозагрузки? (y/n): ").lower()
+                if confirm != 'y':
+                    return "Управление автозагрузкой отменено пользователем"
+            
+            valid_actions = ['add', 'remove', 'list']
+            if action not in valid_actions:
+                return f"Недопустимое действие. Доступны: {', '.join(valid_actions)}"
+            
+            if action == 'list':
+                return self.list_startup_programs()
+            
+            if not program_name:
+                return "Ошибка: Не указано имя программы"
+            
+            # Определяем ключ реестра
+            if location == "current_user":
+                reg_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                reg_root = winreg.HKEY_CURRENT_USER
+            else:
+                reg_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                reg_root = winreg.HKEY_LOCAL_MACHINE
+            
+            if action == 'add':
+                if not program_path:
+                    return "Ошибка: Не указан путь к программе"
+                
+                # Добавляем в реестр
+                with winreg.OpenKey(reg_root, reg_path, 0, winreg.KEY_WRITE) as key:
+                    winreg.SetValueEx(key, program_name, 0, winreg.REG_SZ, program_path)
+                
+                logger.info(f"Добавлена в автозагрузку: {program_name}")
+                return f"✅ Программа '{program_name}' добавлена в автозагрузку"
+            
+            elif action == 'remove':
+                # Удаляем из реестра
+                try:
+                    with winreg.OpenKey(reg_root, reg_path, 0, winreg.KEY_WRITE) as key:
+                        winreg.DeleteValue(key, program_name)
+                    
+                    logger.info(f"Удалена из автозагрузки: {program_name}")
+                    return f"✅ Программа '{program_name}' удалена из автозагрузки"
+                except FileNotFoundError:
+                    return f"⚠️ Программа '{program_name}' не обнаружена в автозагрузке"
+                    
+        except Exception as e:
+            return f"❌ Ошибка управления автозагрузкой: {str(e)}"
     
     # 🔍 Поиск и загрузка изображений
     def search_and_download_images(self, query, num_images=5, save_path=None):
@@ -3844,7 +4590,19 @@ python main.py
             "что изображено", "что на изображении", "что на фото", "что на картинке", "что на ico", 
             "анализ изображения", "опиши изображение", "опиши фото", "анализируй", "проанализируй",
             "ico", ".ico", "иконка", "значок", "icon", "в папке", "в каталоге", "в директории",
-            "в этой папке", "в этом каталоге", "в этой директории", "файл ico", "изображение ico"
+            "в этой папке", "в этом каталоге", "в этой директории", "файл ico", "изображение ico",
+            # Системные команды
+            "команду", "команда", "command", "cmd", "командную строку", "терминал", "консоль",
+            "питон", "python", "код", "script", "скрипт", "программу", "program",
+            "корзину", "recycle", "bin", "очисти", "очистить", "clear", "clean",
+            "служб", "service", "сервис", "процесс", "process", "запусти", "останови", "перезапусти",
+            "start", "stop", "restart", "статус", "status",
+            "реестр", "registry", "ключ", "параметр", "значение", "reg", "winreg",
+            "систем", "system", "процессор", "память", "диск", "cpu", "ram", "disk", "информация", "info",
+            "через командную строку", "в командной строке", "command line", "terminal", "shell",
+            # Автозагрузка
+            "автозагрузк", "startup", "запуск", "автостарт", "autostart", "загрузка системы", "boot",
+            "программы при запуске", "автоматически запускаемые", "startup programs", "autorun"
         ]
         
         # Специальная проверка для аудио запросов
